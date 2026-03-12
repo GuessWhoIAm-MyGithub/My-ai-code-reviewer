@@ -1,4 +1,4 @@
-name: "AI Code Review Action"
+name: "AI Code Review Action Provider Can Vary"
 description: "Perform code reviews and comment on diffs using AI (OpenAI, Anthropic, or Gemini)."
 inputs:
   GITHUB_TOKEN:
