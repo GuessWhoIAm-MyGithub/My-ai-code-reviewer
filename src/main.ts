@@ -1,7 +1,7 @@
 import { readFileSync } from "fs";
 import * as core from "@actions/core";
 import { Octokit } from "@octokit/rest";
-import parseDiff, { Chunk, File } from "parse-diff";
+import parseDiff, { Chunk, File, Change } from "parse-diff";
 import minimatch from "minimatch";
 import { createProvider, AIProvider } from "./providers";
 
@@ -89,9 +89,34 @@ async function analyzeCode(
   return comments;
 }
 
+function getNewFileLineNumber(change: Change): number | null {
+  switch (change.type) {
+    case "add":
+      return change.ln;
+    case "normal":
+      return change.ln2;
+    case "del":
+      return null; // deleted lines don't exist in the new file
+  }
+}
+
+function formatChange(change: Change): string {
+  const newLine = getNewFileLineNumber(change);
+  const lineLabel = newLine != null ? String(newLine) : "-";
+  const prefix =
+    change.type === "add" ? "+" : change.type === "del" ? "-" : " ";
+  // change.content already has +/- prefix from parse-diff, strip it for clean formatting
+  const content = change.content.startsWith("+") || change.content.startsWith("-")
+    ? change.content.slice(1)
+    : change.content;
+  return `${lineLabel} ${prefix} ${content}`;
+}
+
 function createPrompt(file: File, chunk: Chunk, prDetails: PRDetails): string {
   return `Your task is to review pull requests. Instructions:
 - Provide the response in following JSON format:  {"reviews": [{"lineNumber":  <line_number>, "reviewComment": "<review comment>"}]}
+- The lineNumber must be a line number from the NEW version of the file (lines marked with "+" or " ", NOT lines marked with "-").
+- Only comment on added ("+") or context (" ") lines. Do NOT comment on deleted ("-") lines.
 - Do not give positive comments or compliments.
 - Provide comments and suggestions ONLY if there is something to improve, otherwise "reviews" should be an empty array.
 - Write the comment in GitHub Markdown format.
@@ -101,6 +126,8 @@ function createPrompt(file: File, chunk: Chunk, prDetails: PRDetails): string {
 Review the following code diff in the file "${
     file.to
   }" and take the pull request title and description into account when writing the response.
+
+The diff format: each line starts with the new-file line number (or "-" for deleted lines), followed by a change type indicator ("+" for added, "-" for deleted, " " for context/unchanged), then the code.
 
 Pull request title: ${prDetails.title}
 Pull request description:
@@ -113,10 +140,7 @@ Git diff to review:
 
 \`\`\`diff
 ${chunk.content}
-${chunk.changes
-  // @ts-expect-error - ln and ln2 exists where needed
-  .map((c) => `${c.ln ? c.ln : c.ln2} ${c.content}`)
-  .join("\n")}
+${chunk.changes.map(formatChange).join("\n")}
 \`\`\`
 `;
 }
@@ -136,14 +160,30 @@ function createComment(
     reviewComment: string;
   }>
 ): Array<{ body: string; path: string; line: number }> {
+  // Collect valid new-file line numbers from this chunk
+  const validLines = new Set<number>();
+  for (const change of chunk.changes) {
+    const ln = getNewFileLineNumber(change);
+    if (ln != null) {
+      validLines.add(ln);
+    }
+  }
+
   return aiResponses.flatMap((aiResponse) => {
     if (!file.to) {
+      return [];
+    }
+    const line = Number(aiResponse.lineNumber);
+    if (!validLines.has(line)) {
+      console.warn(
+        `Skipping comment: line ${line} is not a valid new-file line in chunk for ${file.to}`
+      );
       return [];
     }
     return {
       body: aiResponse.reviewComment,
       path: file.to,
-      line: Number(aiResponse.lineNumber),
+      line,
     };
   });
 }
