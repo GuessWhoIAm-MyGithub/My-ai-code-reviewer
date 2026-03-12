@@ -1,0 +1,45 @@
+name: AI Code Review
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+permissions: write-all
+jobs:
+  code_review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      # --- Choose ONE of the following provider configurations ---
+
+      # Option 1: OpenAI
+      - name: AI Code Review (OpenAI)
+        uses: freeedcom/ai-codereviewer@main
+        with:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          API_PROVIDER: "openai"
+          API_MODEL: "gpt-4"
+          exclude: "yarn.lock,dist/**"
+
+      # Option 2: Anthropic Claude
+      # - name: AI Code Review (Anthropic)
+      #   uses: freeedcom/ai-codereviewer@main
+      #   with:
+      #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      #     API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      #     API_PROVIDER: "anthropic"
+      #     API_MODEL: "claude-sonnet-4-20250514"
+      #     exclude: "yarn.lock,dist/**"
+
+      # Option 3: Google Gemini
+      # - name: AI Code Review (Gemini)
+      #   uses: freeedcom/ai-codereviewer@main
+      #   with:
+      #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      #     API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      #     API_PROVIDER: "gemini"
+      #     API_MODEL: "gemini-pro"
+      #     exclude: "yarn.lock,dist/**"
