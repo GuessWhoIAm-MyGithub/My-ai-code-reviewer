@@ -38,7 +38,7 @@ jobs:
         uses: actions/checkout@v3
 
       - name: AI Code Reviewer
-        uses: freeedcom/ai-codereviewer@main
+        uses: GuessWhoIAm-MyGithub/My-ai-code-reviewer@main
         with:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -63,7 +63,7 @@ jobs:
         uses: actions/checkout@v3
 
       - name: AI Code Reviewer
-        uses: freeedcom/ai-codereviewer@main
+        uses: GuessWhoIAm-MyGithub/My-ai-code-reviewer@main
         with:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -88,7 +88,7 @@ jobs:
         uses: actions/checkout@v3
 
       - name: AI Code Reviewer
-        uses: freeedcom/ai-codereviewer@main
+        uses: GuessWhoIAm-MyGithub/My-ai-code-reviewer@main
         with:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -103,7 +103,7 @@ You can point OpenAI or Anthropic to a custom endpoint (e.g., Azure OpenAI, loca
 
 ```yaml
       - name: AI Code Reviewer
-        uses: freeedcom/ai-codereviewer@main
+        uses: GuessWhoIAm-MyGithub/My-ai-code-reviewer@main
         with:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           API_KEY: ${{ secrets.API_KEY }}
