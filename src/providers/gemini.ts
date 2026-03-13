@@ -21,7 +21,7 @@ export class GeminiProvider implements AIProvider {
         model: this.model,
         generationConfig: {
           temperature: 0.2,
-          maxOutputTokens: 700,
+          maxOutputTokens: 8192,
           responseMimeType: "application/json",
         },
       });

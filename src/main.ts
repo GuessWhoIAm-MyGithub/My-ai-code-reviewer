@@ -1,7 +1,7 @@
 import { readFileSync } from "fs";
 import * as core from "@actions/core";
 import { Octokit } from "@octokit/rest";
-import parseDiff, { Chunk, File, Change } from "parse-diff";
+import parseDiff, { File, Change } from "parse-diff";
 import minimatch from "minimatch";
 import { createProvider, AIProvider } from "./providers";
 
@@ -75,14 +75,15 @@ async function analyzeCode(
 
   for (const file of parsedDiff) {
     if (file.to === "/dev/null") continue; // Ignore deleted files
-    for (const chunk of file.chunks) {
-      const prompt = createPrompt(file, chunk, prDetails);
-      const aiResponse = await getAIResponse(prompt);
-      if (aiResponse) {
-        const newComments = createComment(file, chunk, aiResponse);
-        if (newComments) {
-          comments.push(...newComments);
-        }
+    if (file.chunks.length === 0) continue;
+
+    // Send all chunks of a file in one prompt
+    const prompt = createFilePrompt(file, prDetails);
+    const aiResponse = await getAIResponse(prompt);
+    if (aiResponse) {
+      const newComments = createFileComment(file, aiResponse);
+      if (newComments.length > 0) {
+        comments.push(...newComments);
       }
     }
   }
@@ -112,7 +113,15 @@ function formatChange(change: Change): string {
   return `${lineLabel} ${prefix} ${content}`;
 }
 
-function createPrompt(file: File, chunk: Chunk, prDetails: PRDetails): string {
+function createFilePrompt(file: File, prDetails: PRDetails): string {
+  const allChunksFormatted = file.chunks
+    .map((chunk) => {
+      const header = chunk.content;
+      const lines = chunk.changes.map(formatChange).join("\n");
+      return `${header}\n${lines}`;
+    })
+    .join("\n\n");
+
   return `Your task is to review pull requests. Instructions:
 - Provide the response in following JSON format:  {"reviews": [{"lineNumber":  <line_number>, "reviewComment": "<review comment>"}]}
 - The lineNumber must be a line number from the NEW version of the file (lines marked with "+" or " ", NOT lines marked with "-").
@@ -122,6 +131,7 @@ function createPrompt(file: File, chunk: Chunk, prDetails: PRDetails): string {
 - Write the comment in GitHub Markdown format.
 - Use the given description only for the overall context and only comment the code.
 - IMPORTANT: NEVER suggest adding comments to the code.
+- If you have multiple issues on nearby lines, combine them into ONE review comment on the most relevant line.
 
 Review the following code diff in the file "${
     file.to
@@ -139,8 +149,7 @@ ${prDetails.description}
 Git diff to review:
 
 \`\`\`diff
-${chunk.content}
-${chunk.changes.map(formatChange).join("\n")}
+${allChunksFormatted}
 \`\`\`
 `;
 }
@@ -152,40 +161,53 @@ async function getAIResponse(prompt: string): Promise<Array<{
   return provider.getReview(prompt);
 }
 
-function createComment(
+function createFileComment(
   file: File,
-  chunk: Chunk,
   aiResponses: Array<{
     lineNumber: string;
     reviewComment: string;
   }>
 ): Array<{ body: string; path: string; line: number }> {
-  // Collect valid new-file line numbers from this chunk
+  if (!file.to) return [];
+
+  // Collect all valid new-file line numbers across all chunks
   const validLines = new Set<number>();
-  for (const change of chunk.changes) {
-    const ln = getNewFileLineNumber(change);
-    if (ln != null) {
-      validLines.add(ln);
+  for (const chunk of file.chunks) {
+    for (const change of chunk.changes) {
+      const ln = getNewFileLineNumber(change);
+      if (ln != null) {
+        validLines.add(ln);
+      }
     }
   }
 
-  return aiResponses.flatMap((aiResponse) => {
-    if (!file.to) {
-      return [];
-    }
-    const line = Number(aiResponse.lineNumber);
+  // Filter to valid responses only
+  const validResponses = aiResponses.filter((r) => {
+    const line = Number(r.lineNumber);
     if (!validLines.has(line)) {
       console.warn(
-        `Skipping comment: line ${line} is not a valid new-file line in chunk for ${file.to}`
+        `Skipping comment: line ${line} is not a valid new-file line for ${file.to}`
       );
-      return [];
+      return false;
     }
-    return {
-      body: aiResponse.reviewComment,
-      path: file.to,
-      line,
-    };
+    return true;
   });
+
+  if (validResponses.length === 0) return [];
+
+  // Merge all comments into one, posted on the first mentioned line
+  const firstLine = Number(validResponses[0].lineNumber);
+  const mergedBody = validResponses
+    .map((r) => `**Line ${r.lineNumber}:** ${r.reviewComment}`)
+    .join("\n\n");
+
+  return [
+    {
+      body: mergedBody,
+      path: file.to,
+      line: firstLine,
+    },
+  ];
 }
 
 async function createReviewComment(
