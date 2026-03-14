@@ -210,6 +210,50 @@ function createFileComment(
   ];
 }
 
+async function getMergeSuggestion(
+  prDetails: PRDetails,
+  files: File[],
+  comments: Array<{ body: string; path: string; line: number }>
+): Promise<string | null> {
+  const changedFiles = files
+    .filter((f) => f.to && f.to !== "/dev/null")
+    .map((f) => f.to)
+    .join(", ");
+
+  const issuesSummary =
+    comments.length > 0
+      ? comments.map((c) => `- [${c.path}] ${c.body}`).join("\n")
+      : "No issues found.";
+
+  const prompt = `You are a senior code reviewer. Based on the following pull request information and the code review results, provide a merge recommendation.
+
+Pull request title: ${prDetails.title}
+Pull request description:
+---
+${prDetails.description}
+---
+
+Changed files: ${changedFiles}
+Total files reviewed: ${files.length}
+Total issues found: ${comments.length}
+
+Review issues found:
+${issuesSummary}
+
+Please provide your response in the following format (use GitHub Markdown):
+
+1. Start with a heading: "## 🤖 AI Code Review - Merge Recommendation"
+2. Show a clear recommendation: ✅ **Recommend to Merge** or ❌ **Do Not Merge**
+3. Provide a "### Summary" section with a brief overview of the changes
+4. Provide a "### Reason" section explaining why you recommend or do not recommend merging
+5. If there are issues, add a "### Issues to Address" section listing the key concerns
+6. End with a "### Risk Level" assessment: Low / Medium / High
+
+Be concise and actionable. Write in a professional tone.`;
+
+  return provider.chat(prompt);
+}
+
 async function createReviewComment(
   owner: string,
   repo: string,
@@ -284,6 +328,21 @@ async function main() {
       prDetails.pull_number,
       comments
     );
+  }
+
+  // Post merge suggestion as a top-level PR comment
+  const mergeSuggestion = await getMergeSuggestion(
+    prDetails,
+    filteredDiff,
+    comments
+  );
+  if (mergeSuggestion) {
+    await octokit.issues.createComment({
+      owner: prDetails.owner,
+      repo: prDetails.repo,
+      issue_number: prDetails.pull_number,
+      body: mergeSuggestion,
+    });
   }
 }
 

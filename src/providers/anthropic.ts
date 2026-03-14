@@ -41,4 +41,21 @@ export class AnthropicProvider implements AIProvider {
       return null;
     }
   }
+
+  async chat(prompt: string): Promise<string | null> {
+    try {
+      const response = await this.client.messages.create({
+        model: this.model,
+        max_tokens: 8192,
+        temperature: 0.2,
+        messages: [{ role: "user", content: prompt }],
+      });
+      const textBlock = response.content.find((block) => block.type === "text");
+      if (!textBlock || textBlock.type !== "text") return null;
+      return textBlock.text.trim() || null;
+    } catch (error) {
+      console.error("Anthropic Chat Error:", error);
+      return null;
+    }
+  }
 }

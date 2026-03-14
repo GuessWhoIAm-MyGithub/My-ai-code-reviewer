@@ -36,4 +36,21 @@ export class GeminiProvider implements AIProvider {
       return null;
     }
   }
+
+  async chat(prompt: string): Promise<string | null> {
+    try {
+      const model = this.genAI.getGenerativeModel({
+        model: this.model,
+        generationConfig: {
+          temperature: 0.2,
+          maxOutputTokens: 8192,
+        },
+      });
+      const result = await model.generateContent(prompt);
+      return result.response.text().trim() || null;
+    } catch (error) {
+      console.error("Gemini Chat Error:", error);
+      return null;
+    }
+  }
 }

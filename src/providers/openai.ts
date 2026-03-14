@@ -41,4 +41,19 @@ export class OpenAIProvider implements AIProvider {
       return null;
     }
   }
+
+  async chat(prompt: string): Promise<string | null> {
+    try {
+      const response = await this.client.chat.completions.create({
+        model: this.model,
+        temperature: 0.2,
+        max_tokens: 8192,
+        messages: [{ role: "user", content: prompt }],
+      });
+      return response.choices[0].message?.content?.trim() || null;
+    } catch (error) {
+      console.error("OpenAI Chat Error:", error);
+      return null;
+    }
+  }
 }

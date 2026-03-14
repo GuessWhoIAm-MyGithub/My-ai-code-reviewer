@@ -213,6 +213,43 @@ function createFileComment(file, aiResponses) {
         },
     ];
 }
+function getMergeSuggestion(prDetails, files, comments) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const changedFiles = files
+            .filter((f) => f.to && f.to !== "/dev/null")
+            .map((f) => f.to)
+            .join(", ");
+        const issuesSummary = comments.length > 0
+            ? comments.map((c) => `- [${c.path}] ${c.body}`).join("\n")
+            : "No issues found.";
+        const prompt = `You are a senior code reviewer. Based on the following pull request information and the code review results, provide a merge recommendation.
+
+Pull request title: ${prDetails.title}
+Pull request description:
+---
+${prDetails.description}
+---
+
+Changed files: ${changedFiles}
+Total files reviewed: ${files.length}
+Total issues found: ${comments.length}
+
+Review issues found:
+${issuesSummary}
+
+Please provide your response in the following format (use GitHub Markdown):
+
+1. Start with a heading: "## 🤖 AI Code Review - Merge Recommendation"
+2. Show a clear recommendation: ✅ **Recommend to Merge** or ❌ **Do Not Merge**
+3. Provide a "### Summary" section with a brief overview of the changes
+4. Provide a "### Reason" section explaining why you recommend or do not recommend merging
+5. If there are issues, add a "### Issues to Address" section listing the key concerns
+6. End with a "### Risk Level" assessment: Low / Medium / High
+
+Be concise and actionable. Write in a professional tone.`;
+        return provider.chat(prompt);
+    });
+}
 function createReviewComment(owner, repo, pull_number, comments) {
     return __awaiter(this, void 0, void 0, function* () {
         yield octokit.pulls.createReview({
@@ -266,6 +303,16 @@ function main() {
         const comments = yield analyzeCode(filteredDiff, prDetails);
         if (comments.length > 0) {
             yield createReviewComment(prDetails.owner, prDetails.repo, prDetails.pull_number, comments);
+        }
+        // Post merge suggestion as a top-level PR comment
+        const mergeSuggestion = yield getMergeSuggestion(prDetails, filteredDiff, comments);
+        if (mergeSuggestion) {
+            yield octokit.issues.createComment({
+                owner: prDetails.owner,
+                repo: prDetails.repo,
+                issue_number: prDetails.pull_number,
+                body: mergeSuggestion,
+            });
         }
     });
 }
@@ -331,6 +378,26 @@ class AnthropicProvider {
             }
         });
     }
+    chat(prompt) {
+        return __awaiter(this, void 0, void 0, function* () {
+            try {
+                const response = yield this.client.messages.create({
+                    model: this.model,
+                    max_tokens: 8192,
+                    temperature: 0.2,
+                    messages: [{ role: "user", content: prompt }],
+                });
+                const textBlock = response.content.find((block) => block.type === "text");
+                if (!textBlock || textBlock.type !== "text")
+                    return null;
+                return textBlock.text.trim() || null;
+            }
+            catch (error) {
+                console.error("Anthropic Chat Error:", error);
+                return null;
+            }
+        });
+    }
 }
 exports.AnthropicProvider = AnthropicProvider;
 
@@ -382,6 +449,25 @@ class GeminiProvider {
             }
             catch (error) {
                 console.error("Gemini Error:", error);
+                return null;
+            }
+        });
+    }
+    chat(prompt) {
+        return __awaiter(this, void 0, void 0, function* () {
+            try {
+                const model = this.genAI.getGenerativeModel({
+                    model: this.model,
+                    generationConfig: {
+                        temperature: 0.2,
+                        maxOutputTokens: 8192,
+                    },
+                });
+                const result = yield model.generateContent(prompt);
+                return result.response.text().trim() || null;
+            }
+            catch (error) {
+                console.error("Gemini Chat Error:", error);
                 return null;
             }
         });
@@ -463,6 +549,24 @@ class OpenAIProvider {
             }
             catch (error) {
                 console.error("OpenAI Error:", error);
+                return null;
+            }
+        });
+    }
+    chat(prompt) {
+        var _a, _b;
+        return __awaiter(this, void 0, void 0, function* () {
+            try {
+                const response = yield this.client.chat.completions.create({
+                    model: this.model,
+                    temperature: 0.2,
+                    max_tokens: 8192,
+                    messages: [{ role: "user", content: prompt }],
+                });
+                return ((_b = (_a = response.choices[0].message) === null || _a === void 0 ? void 0 : _a.content) === null || _b === void 0 ? void 0 : _b.trim()) || null;
+            }
+            catch (error) {
+                console.error("OpenAI Chat Error:", error);
                 return null;
             }
         });

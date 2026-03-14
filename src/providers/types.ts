@@ -5,6 +5,7 @@ export interface ReviewComment {
 
 export interface AIProvider {
   getReview(prompt: string): Promise<ReviewComment[] | null>;
+  chat(prompt: string): Promise<string | null>;
 }
 
 export interface ProviderConfig {
