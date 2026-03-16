@@ -122,31 +122,31 @@ function createFilePrompt(file: File, prDetails: PRDetails): string {
     })
     .join("\n\n");
 
-  return `Your task is to review pull requests. Instructions:
-- Provide the response in following JSON format:  {"reviews": [{"lineNumber":  <line_number>, "reviewComment": "<review comment>"}]}
-- The lineNumber must be a line number from the NEW version of the file (lines marked with "+" or " ", NOT lines marked with "-").
-- Only comment on added ("+") or context (" ") lines. Do NOT comment on deleted ("-") lines.
-- Do not give positive comments or compliments.
-- Provide comments and suggestions ONLY if there is something to improve, otherwise "reviews" should be an empty array.
-- Write the comment in GitHub Markdown format.
-- Use the given description only for the overall context and only comment the code.
-- IMPORTANT: NEVER suggest adding comments to the code.
-- If you have multiple issues on nearby lines, combine them into ONE review comment on the most relevant line.
+  return `你的任务是审查 Pull Request。指令如下：
+- 以如下 JSON 格式返回结果：{"reviews": [{"lineNumber": <行号>, "reviewComment": "<审查意见>"}]}
+- lineNumber 必须是新文件中的行号（标有"+"或空格的行），不能是被删除的行（标有"-"的行）。
+- 只对新增（"+"）或上下文（" "）行进行评论，不对删除（"-"）行进行评论。
+- 不要给出正面评价或赞美。
+- 只有在发现需要改进的地方时才提供意见，否则"reviews"应为空数组。
+- 以 GitHub Markdown 格式书写评论。
+- 仅将给定的描述用于整体背景理解，只对代码本身进行评论。
+- 重要：绝对不要建议在代码中添加注释。
+- 如果相邻行有多个问题，请合并为一条审查意见，放在最相关的行上。
 
-Review the following code diff in the file "${
+请审查文件"${
     file.to
-  }" and take the pull request title and description into account when writing the response.
+  }"中的以下代码差异，并在撰写回复时将 Pull Request 标题和描述纳入考量。
 
-The diff format: each line starts with the new-file line number (or "-" for deleted lines), followed by a change type indicator ("+" for added, "-" for deleted, " " for context/unchanged), then the code.
+Diff 格式说明：每行以新文件行号（或被删除行用"-"表示）开头，随后是变更类型标识（"+"表示新增，"-"表示删除，" "表示上下文/未变更），然后是代码内容。
 
-Pull request title: ${prDetails.title}
-Pull request description:
+Pull Request 标题：${prDetails.title}
+Pull Request 描述：
 
 ---
 ${prDetails.description}
 ---
 
-Git diff to review:
+待审查的 Git Diff：
 
 \`\`\`diff
 ${allChunksFormatted}
@@ -225,31 +225,31 @@ async function getMergeSuggestion(
       ? comments.map((c) => `- [${c.path}] ${c.body}`).join("\n")
       : "No issues found.";
 
-  const prompt = `You are a senior code reviewer. Based on the following pull request information and the code review results, provide a merge recommendation.
+  const prompt = `你是一位资深代码审查员。请根据以下 Pull Request 信息和代码审查结果，给出合并建议。
 
-Pull request title: ${prDetails.title}
-Pull request description:
+Pull Request 标题：${prDetails.title}
+Pull Request 描述：
 ---
 ${prDetails.description}
 ---
 
-Changed files: ${changedFiles}
-Total files reviewed: ${files.length}
-Total issues found: ${comments.length}
+变更文件：${changedFiles}
+已审查文件总数：${files.length}
+发现问题总数：${comments.length}
 
-Review issues found:
+发现的审查问题：
 ${issuesSummary}
 
-Please provide your response in the following format (use GitHub Markdown):
+请按以下格式给出回复（使用 GitHub Markdown）：
 
-1. Start with a heading: "## 🤖 AI Code Review - Merge Recommendation"
-2. Show a clear recommendation: ✅ **Recommend to Merge** or ❌ **Do Not Merge**
-3. Provide a "### Summary" section with a brief overview of the changes
-4. Provide a "### Reason" section explaining why you recommend or do not recommend merging
-5. If there are issues, add a "### Issues to Address" section listing the key concerns
-6. End with a "### Risk Level" assessment: Low / Medium / High
+1. 以标题开头："## 🤖 AI 代码审查 - 合并建议"
+2. 给出明确建议：✅ **建议合并** 或 ❌ **不建议合并**
+3. 提供"### 摘要"章节，简要概述变更内容
+4. 提供"### 原因"章节，说明建议或不建议合并的理由
+5. 如有问题，添加"### 待解决问题"章节，列出主要关注点
+6. 最后以"### 风险等级"作结：低 / 中 / 高
 
-Be concise and actionable. Write in a professional tone.`;
+请保持简洁、可操作性强，使用专业语气。`;
 
   return provider.chat(prompt);
 }
