@@ -17,7 +17,13 @@ export interface ProviderConfig {
 export function sanitizeJsonResponse(raw: string): string {
   let cleaned = raw.trim();
   if (cleaned.startsWith("```")) {
-    cleaned = cleaned.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
+    cleaned = cleaned.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "").trim();
+  }
+  // Extract JSON object in case the model prepended preamble text
+  const jsonStart = cleaned.indexOf("{");
+  const jsonEnd = cleaned.lastIndexOf("}");
+  if (jsonStart !== -1 && jsonEnd !== -1 && jsonStart < jsonEnd) {
+    cleaned = cleaned.slice(jsonStart, jsonEnd + 1);
   }
   return cleaned;
 }

@@ -123,6 +123,7 @@ function createFilePrompt(file: File, prDetails: PRDetails): string {
     .join("\n\n");
 
   return `你的任务是审查 Pull Request。指令如下：
+- 只输出 JSON，不要输出任何自然语言描述、前言或解释。
 - 以如下 JSON 格式返回结果：{"reviews": [{"lineNumber": <行号>, "reviewComment": "<审查意见>"}]}
 - lineNumber 必须是新文件中的行号（标有"+"或空格的行），不能是被删除的行（标有"-"的行）。
 - 只对新增（"+"）或上下文（" "）行进行评论，不对删除（"-"）行进行评论。
