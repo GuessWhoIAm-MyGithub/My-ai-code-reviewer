@@ -417,7 +417,7 @@ class AnthropicProvider {
             try {
                 const response = yield this.client.messages.create({
                     model: this.model,
-                    max_tokens: 10000,
+                    max_tokens: 30000,
                     temperature: 0.2,
                     messages: [
                         {
@@ -445,7 +445,7 @@ class AnthropicProvider {
             try {
                 const response = yield this.client.messages.create({
                     model: this.model,
-                    max_tokens: 10000,
+                    max_tokens: 30000,
                     temperature: 0.2,
                     messages: [{ role: "user", content: prompt }],
                 });
@@ -597,7 +597,7 @@ class OpenAIProvider {
         var _a, _b;
         return __awaiter(this, void 0, void 0, function* () {
             try {
-                const response = yield this.client.chat.completions.create(Object.assign(Object.assign({ model: this.model, temperature: 0.2, max_tokens: 10000, top_p: 1, frequency_penalty: 0, presence_penalty: 0 }, (this.model.includes("1106") || this.model.includes("turbo")
+                const response = yield this.client.chat.completions.create(Object.assign(Object.assign({ model: this.model, temperature: 0.2, max_tokens: 30000, top_p: 1, frequency_penalty: 0, presence_penalty: 0 }, (this.model.includes("1106") || this.model.includes("turbo")
                     ? { response_format: { type: "json_object" } }
                     : {})), { messages: [
                         {
@@ -622,7 +622,7 @@ class OpenAIProvider {
                 const response = yield this.client.chat.completions.create({
                     model: this.model,
                     temperature: 0.2,
-                    max_tokens: 10000,
+                    max_tokens: 30000,
                     messages: [{ role: "user", content: prompt }],
                 });
                 return ((_b = (_a = response.choices[0].message) === null || _a === void 0 ? void 0 : _a.content) === null || _b === void 0 ? void 0 : _b.trim()) || null;

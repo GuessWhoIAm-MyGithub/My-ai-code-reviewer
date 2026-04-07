@@ -18,7 +18,7 @@ export class OpenAIProvider implements AIProvider {
       const response = await this.client.chat.completions.create({
         model: this.model,
         temperature: 0.2,
-        max_tokens: 10000,
+        max_tokens: 30000,
         top_p: 1,
         frequency_penalty: 0,
         presence_penalty: 0,
@@ -47,7 +47,7 @@ export class OpenAIProvider implements AIProvider {
       const response = await this.client.chat.completions.create({
         model: this.model,
         temperature: 0.2,
-        max_tokens: 10000,
+        max_tokens: 30000,
         messages: [{ role: "user", content: prompt }],
       });
       return response.choices[0].message?.content?.trim() || null;
