@@ -32,6 +32,7 @@ interface PRDetails {
   pull_number: number;
   title: string;
   description: string;
+  headSha: string;
 }
 
 async function getPRDetails(): Promise<PRDetails> {
@@ -49,7 +50,65 @@ async function getPRDetails(): Promise<PRDetails> {
     pull_number: number,
     title: prResponse.data.title ?? "",
     description: prResponse.data.body ?? "",
+    headSha: prResponse.data.head.sha,
   };
+}
+
+async function getFileContent(
+  owner: string,
+  repo: string,
+  path: string,
+  ref: string
+): Promise<string[] | null> {
+  try {
+    const response = await octokit.repos.getContent({ owner, repo, path, ref });
+    const data = response.data;
+    if (Array.isArray(data) || data.type !== "file") return null;
+    const content = Buffer.from(data.content, "base64").toString("utf-8");
+    return content.split("\n");
+  } catch {
+    return null;
+  }
+}
+
+function extractContextWindow(
+  fileLines: string[],
+  chunks: import("parse-diff").Chunk[],
+  windowSize = 20
+): string {
+  const MAX_LINES = 150;
+  // 收集每个 chunk 变更区域的行范围（1-based）
+  const ranges: Array<[number, number]> = chunks.map((chunk) => {
+    const start = Math.max(1, chunk.newStart - windowSize);
+    const end = Math.min(fileLines.length, chunk.newStart + chunk.newLines + windowSize - 1);
+    return [start, end];
+  });
+
+  // 合并重叠区间
+  ranges.sort((a, b) => a[0] - b[0]);
+  const merged: Array<[number, number]> = [];
+  for (const [s, e] of ranges) {
+    if (merged.length > 0 && s <= merged[merged.length - 1][1] + 1) {
+      merged[merged.length - 1][1] = Math.max(merged[merged.length - 1][1], e);
+    } else {
+      merged.push([s, e]);
+    }
+  }
+
+  // 收集行，超过 MAX_LINES 截断
+  const resultLines: string[] = [];
+  for (const [s, e] of merged) {
+    for (let i = s; i <= e; i++) {
+      if (resultLines.length >= MAX_LINES) break;
+      const lineNum = String(i).padStart(4, " ");
+      resultLines.push(`${lineNum} | ${fileLines[i - 1]}`);
+    }
+    if (resultLines.length >= MAX_LINES) {
+      resultLines.push("     | ... (truncated)");
+      break;
+    }
+  }
+  return resultLines.join("\n");
 }
 
 async function getDiff(
@@ -77,8 +136,10 @@ async function analyzeCode(
     if (file.to === "/dev/null") continue; // Ignore deleted files
     if (file.chunks.length === 0) continue;
 
-    // Send all chunks of a file in one prompt
-    const prompt = createFilePrompt(file, prDetails);
+    // Send all chunks of a file in one prompt, with optional full-file context
+    const fileLines = await getFileContent(prDetails.owner, prDetails.repo, file.to!, prDetails.headSha);
+    const fileContext = fileLines ? extractContextWindow(fileLines, file.chunks) : null;
+    const prompt = createFilePrompt(file, prDetails, fileContext);
     const aiResponse = await getAIResponse(prompt);
     if (aiResponse) {
       const newComments = createFileComment(file, aiResponse);
@@ -113,7 +174,7 @@ function formatChange(change: Change): string {
   return `${lineLabel} ${prefix} ${content}`;
 }
 
-function createFilePrompt(file: File, prDetails: PRDetails): string {
+function createFilePrompt(file: File, prDetails: PRDetails, fileContext: string | null): string {
   const allChunksFormatted = file.chunks
     .map((chunk) => {
       const header = chunk.content;
@@ -121,6 +182,10 @@ function createFilePrompt(file: File, prDetails: PRDetails): string {
       return `${header}\n${lines}`;
     })
     .join("\n\n");
+
+  const contextSection = fileContext
+    ? `\n文件上下文（供参考，无需对此部分发表意见）：\n\n\`\`\`\n${fileContext}\n\`\`\`\n`
+    : "";
 
   return `你的任务是审查 Pull Request。指令如下：
 - 只输出 JSON，不要输出任何自然语言描述、前言或解释。
@@ -133,10 +198,13 @@ function createFilePrompt(file: File, prDetails: PRDetails): string {
 - 仅将给定的描述用于整体背景理解，只对代码本身进行评论。
 - 重要：绝对不要建议在代码中添加注释。
 - 如果相邻行有多个问题，请合并为一条审查意见，放在最相关的行上。
+- 请重点审查以下维度：
+  - 安全性：未校验的输入、注入风险、敏感信息泄露、权限控制缺失
+  - 正确性：空值/undefined 未处理、边界条件、异常未捕获、逻辑错误
+  - 性能：不必要的重复计算、循环中的昂贵操作、潜在的内存泄漏
+  - 可维护性：重复逻辑、函数职责过重、命名歧义
 
-请审查文件"${
-    file.to
-  }"中的以下代码差异，并在撰写回复时将 Pull Request 标题和描述纳入考量。
+请审查文件"${file.to}"中的以下代码差异，并在撰写回复时将 Pull Request 标题和描述纳入考量。
 
 Diff 格式说明：每行以新文件行号（或被删除行用"-"表示）开头，随后是变更类型标识（"+"表示新增，"-"表示删除，" "表示上下文/未变更），然后是代码内容。
 
@@ -146,7 +214,7 @@ Pull Request 描述：
 ---
 ${prDetails.description}
 ---
-
+${contextSection}
 待审查的 Git Diff：
 
 \`\`\`diff
