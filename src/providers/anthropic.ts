@@ -15,24 +15,15 @@ export class AnthropicProvider implements AIProvider {
 
   async getReview(prompt: string): Promise<ReviewComment[] | null> {
     try {
-      const response = await this.client.messages.create({
+      const stream = this.client.messages.stream({
         model: this.model,
         max_tokens: 30000,
         temperature: 0.2,
-        messages: [
-          {
-            role: "user",
-            content: prompt,
-          },
-        ],
+        messages: [{ role: "user", content: prompt }],
       });
-
-      const textBlock = response.content.find(
-        (block) => block.type === "text"
-      );
-      if (!textBlock || textBlock.type !== "text") {
-        return null;
-      }
+      const response = await stream.finalMessage();
+      const textBlock = response.content.find((block) => block.type === "text");
+      if (!textBlock || textBlock.type !== "text") return null;
       const raw = textBlock.text.trim() || "{}";
       const res = sanitizeJsonResponse(raw);
       return JSON.parse(res).reviews;
@@ -44,12 +35,13 @@ export class AnthropicProvider implements AIProvider {
 
   async chat(prompt: string): Promise<string | null> {
     try {
-      const response = await this.client.messages.create({
+      const stream = this.client.messages.stream({
         model: this.model,
         max_tokens: 30000,
         temperature: 0.2,
         messages: [{ role: "user", content: prompt }],
       });
+      const response = await stream.finalMessage();
       const textBlock = response.content.find((block) => block.type === "text");
       if (!textBlock || textBlock.type !== "text") return null;
       return textBlock.text.trim() || null;

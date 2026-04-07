@@ -415,21 +415,16 @@ class AnthropicProvider {
     getReview(prompt) {
         return __awaiter(this, void 0, void 0, function* () {
             try {
-                const response = yield this.client.messages.create({
+                const stream = this.client.messages.stream({
                     model: this.model,
                     max_tokens: 30000,
                     temperature: 0.2,
-                    messages: [
-                        {
-                            role: "user",
-                            content: prompt,
-                        },
-                    ],
+                    messages: [{ role: "user", content: prompt }],
                 });
+                const response = yield stream.finalMessage();
                 const textBlock = response.content.find((block) => block.type === "text");
-                if (!textBlock || textBlock.type !== "text") {
+                if (!textBlock || textBlock.type !== "text")
                     return null;
-                }
                 const raw = textBlock.text.trim() || "{}";
                 const res = (0, types_1.sanitizeJsonResponse)(raw);
                 return JSON.parse(res).reviews;
@@ -443,12 +438,13 @@ class AnthropicProvider {
     chat(prompt) {
         return __awaiter(this, void 0, void 0, function* () {
             try {
-                const response = yield this.client.messages.create({
+                const stream = this.client.messages.stream({
                     model: this.model,
                     max_tokens: 30000,
                     temperature: 0.2,
                     messages: [{ role: "user", content: prompt }],
                 });
+                const response = yield stream.finalMessage();
                 const textBlock = response.content.find((block) => block.type === "text");
                 if (!textBlock || textBlock.type !== "text")
                     return null;
