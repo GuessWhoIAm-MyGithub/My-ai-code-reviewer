@@ -4,9 +4,11 @@ import { AIProvider, ProviderConfig, ReviewComment, sanitizeJsonResponse } from 
 export class GeminiProvider implements AIProvider {
   private genAI: GoogleGenerativeAI;
   private model: string;
+  private maxTokens: number;
 
   constructor(config: ProviderConfig) {
     this.model = config.model;
+    this.maxTokens = config.maxTokens;
     if (config.baseUrl) {
       console.warn(
         "Warning: Custom base URL is not supported for the Gemini provider and will be ignored."
@@ -21,7 +23,7 @@ export class GeminiProvider implements AIProvider {
         model: this.model,
         generationConfig: {
           temperature: 0.2,
-          maxOutputTokens: 8192,
+          maxOutputTokens: this.maxTokens,
           responseMimeType: "application/json",
         },
       });
@@ -43,7 +45,7 @@ export class GeminiProvider implements AIProvider {
         model: this.model,
         generationConfig: {
           temperature: 0.2,
-          maxOutputTokens: 8192,
+          maxOutputTokens: this.maxTokens,
         },
       });
       const result = await model.generateContent(prompt);

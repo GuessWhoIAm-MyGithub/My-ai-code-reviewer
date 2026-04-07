@@ -12,6 +12,7 @@ const API_MODEL: string =
   core.getInput("API_MODEL") || core.getInput("OPENAI_API_MODEL") || "gpt-4";
 const API_PROVIDER: string = core.getInput("API_PROVIDER") || "openai";
 const API_BASE_URL: string = core.getInput("API_BASE_URL") || "";
+const MAX_TOKENS: number = parseInt(core.getInput("MAX_TOKENS") || "16384", 10);
 
 if (!API_KEY) {
   core.setFailed("API_KEY (or OPENAI_API_KEY) is required.");
@@ -24,6 +25,7 @@ const provider: AIProvider = createProvider(API_PROVIDER, {
   apiKey: API_KEY,
   model: API_MODEL,
   baseUrl: API_BASE_URL || undefined,
+  maxTokens: MAX_TOKENS,
 });
 
 interface PRDetails {

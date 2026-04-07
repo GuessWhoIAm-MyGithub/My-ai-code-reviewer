@@ -20,6 +20,10 @@ inputs:
     description: "Custom API base URL (overrides the provider default endpoint)."
     required: false
     default: ""
+  MAX_TOKENS:
+    description: "Maximum number of tokens for the AI model response."
+    required: false
+    default: "16384"
   exclude:
     description: "Glob patterns to exclude files from the diff analysis"
     required: false

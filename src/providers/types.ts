@@ -12,6 +12,7 @@ export interface ProviderConfig {
   apiKey: string;
   model: string;
   baseUrl?: string;
+  maxTokens: number;
 }
 
 export function sanitizeJsonResponse(raw: string): string {

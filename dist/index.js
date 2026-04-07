@@ -53,6 +53,7 @@ const API_KEY = core.getInput("API_KEY") || core.getInput("OPENAI_API_KEY");
 const API_MODEL = core.getInput("API_MODEL") || core.getInput("OPENAI_API_MODEL") || "gpt-4";
 const API_PROVIDER = core.getInput("API_PROVIDER") || "openai";
 const API_BASE_URL = core.getInput("API_BASE_URL") || "";
+const MAX_TOKENS = parseInt(core.getInput("MAX_TOKENS") || "16384", 10);
 if (!API_KEY) {
     core.setFailed("API_KEY (or OPENAI_API_KEY) is required.");
     process.exit(1);
@@ -62,6 +63,7 @@ const provider = (0, providers_1.createProvider)(API_PROVIDER, {
     apiKey: API_KEY,
     model: API_MODEL,
     baseUrl: API_BASE_URL || undefined,
+    maxTokens: MAX_TOKENS,
 });
 function getPRDetails() {
     var _a, _b;
@@ -410,6 +412,7 @@ const types_1 = __nccwpck_require__(2933);
 class AnthropicProvider {
     constructor(config) {
         this.model = config.model;
+        this.maxTokens = config.maxTokens;
         this.client = new sdk_1.default(Object.assign({ apiKey: config.apiKey }, (config.baseUrl ? { baseURL: config.baseUrl } : {})));
     }
     getReview(prompt) {
@@ -417,7 +420,7 @@ class AnthropicProvider {
             try {
                 const stream = this.client.messages.stream({
                     model: this.model,
-                    max_tokens: 30000,
+                    max_tokens: this.maxTokens,
                     temperature: 0.2,
                     messages: [{ role: "user", content: prompt }],
                 });
@@ -440,7 +443,7 @@ class AnthropicProvider {
             try {
                 const stream = this.client.messages.stream({
                     model: this.model,
-                    max_tokens: 30000,
+                    max_tokens: this.maxTokens,
                     temperature: 0.2,
                     messages: [{ role: "user", content: prompt }],
                 });
@@ -483,6 +486,7 @@ const types_1 = __nccwpck_require__(2933);
 class GeminiProvider {
     constructor(config) {
         this.model = config.model;
+        this.maxTokens = config.maxTokens;
         if (config.baseUrl) {
             console.warn("Warning: Custom base URL is not supported for the Gemini provider and will be ignored.");
         }
@@ -495,7 +499,7 @@ class GeminiProvider {
                     model: this.model,
                     generationConfig: {
                         temperature: 0.2,
-                        maxOutputTokens: 8192,
+                        maxOutputTokens: this.maxTokens,
                         responseMimeType: "application/json",
                     },
                 });
@@ -518,7 +522,7 @@ class GeminiProvider {
                     model: this.model,
                     generationConfig: {
                         temperature: 0.2,
-                        maxOutputTokens: 8192,
+                        maxOutputTokens: this.maxTokens,
                     },
                 });
                 const result = yield model.generateContent(prompt);
@@ -587,13 +591,14 @@ const types_1 = __nccwpck_require__(2933);
 class OpenAIProvider {
     constructor(config) {
         this.model = config.model;
+        this.maxTokens = config.maxTokens;
         this.client = new openai_1.default(Object.assign({ apiKey: config.apiKey }, (config.baseUrl ? { baseURL: config.baseUrl } : {})));
     }
     getReview(prompt) {
         var _a, _b;
         return __awaiter(this, void 0, void 0, function* () {
             try {
-                const response = yield this.client.chat.completions.create(Object.assign(Object.assign({ model: this.model, temperature: 0.2, max_tokens: 30000, top_p: 1, frequency_penalty: 0, presence_penalty: 0 }, (this.model.includes("1106") || this.model.includes("turbo")
+                const response = yield this.client.chat.completions.create(Object.assign(Object.assign({ model: this.model, temperature: 0.2, max_tokens: this.maxTokens, top_p: 1, frequency_penalty: 0, presence_penalty: 0 }, (this.model.includes("1106") || this.model.includes("turbo")
                     ? { response_format: { type: "json_object" } }
                     : {})), { messages: [
                         {
@@ -618,7 +623,7 @@ class OpenAIProvider {
                 const response = yield this.client.chat.completions.create({
                     model: this.model,
                     temperature: 0.2,
-                    max_tokens: 30000,
+                    max_tokens: this.maxTokens,
                     messages: [{ role: "user", content: prompt }],
                 });
                 return ((_b = (_a = response.choices[0].message) === null || _a === void 0 ? void 0 : _a.content) === null || _b === void 0 ? void 0 : _b.trim()) || null;

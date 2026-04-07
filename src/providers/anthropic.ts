@@ -4,9 +4,11 @@ import { AIProvider, ProviderConfig, ReviewComment, sanitizeJsonResponse } from 
 export class AnthropicProvider implements AIProvider {
   private client: Anthropic;
   private model: string;
+  private maxTokens: number;
 
   constructor(config: ProviderConfig) {
     this.model = config.model;
+    this.maxTokens = config.maxTokens;
     this.client = new Anthropic({
       apiKey: config.apiKey,
       ...(config.baseUrl ? { baseURL: config.baseUrl } : {}),
@@ -17,7 +19,7 @@ export class AnthropicProvider implements AIProvider {
     try {
       const stream = this.client.messages.stream({
         model: this.model,
-        max_tokens: 30000,
+        max_tokens: this.maxTokens,
         temperature: 0.2,
         messages: [{ role: "user", content: prompt }],
       });
@@ -37,7 +39,7 @@ export class AnthropicProvider implements AIProvider {
     try {
       const stream = this.client.messages.stream({
         model: this.model,
-        max_tokens: 30000,
+        max_tokens: this.maxTokens,
         temperature: 0.2,
         messages: [{ role: "user", content: prompt }],
       });
