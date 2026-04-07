@@ -202,7 +202,10 @@ function createFilePrompt(file, prDetails, fileContext) {
         : "";
     return `你的任务是审查 Pull Request。指令如下：
 - 只输出 JSON，不要输出任何自然语言描述、前言或解释。
-- 以如下 JSON 格式返回结果：{"reviews": [{"lineNumber": <行号>, "reviewComment": "<审查意见>"}]}
+- 以如下 JSON 格式返回结果：{"reviews": [{"lineNumber": <行号>, "severity": "<critical|high|medium>", "reviewComment": "<审查意见>"}]}
+  - critical：会导致运行时崩溃或产生错误结果的 bug（空指针、越界、逻辑错误导致计算错误等）
+  - high：不会立即崩溃但存在严重隐患（线程安全问题、资源泄漏、共享可变状态被外部修改等）
+  - medium：设计或可维护性问题（封装不当、命名歧义、职责过重等）
 - lineNumber 必须是新文件中的行号（标有"+"或空格的行），不能是被删除的行（标有"-"的行）。
 - 只对新增（"+"）或上下文（" "）行进行评论，不对删除（"-"）行进行评论。
 - 不要给出正面评价或赞美。
@@ -210,12 +213,15 @@ function createFilePrompt(file, prDetails, fileContext) {
 - 以 GitHub Markdown 格式书写评论。
 - 仅将给定的描述用于整体背景理解，只对代码本身进行评论。
 - 重要：绝对不要建议在代码中添加注释。
+- 每条意见必须说明该问题会导致什么后果，而不只是描述问题本身。
 - 如果相邻行有多个问题，请合并为一条审查意见，放在最相关的行上。
 - 请重点审查以下维度：
   - 安全性：未校验的输入、注入风险、敏感信息泄露、权限控制缺失
-  - 正确性：空值/undefined 未处理、边界条件、异常未捕获、逻辑错误
-  - 性能：不必要的重复计算、循环中的昂贵操作、潜在的内存泄漏
-  - 可维护性：重复逻辑、函数职责过重、命名歧义
+  - 正确性：空值/null 未处理、边界条件、异常未捕获、逻辑错误、数值运算错误（浮点精度丢失、整数截断、单位混用、溢出）
+  - 并发安全：非线程安全对象在共享状态中使用、竞态条件、共享可变状态被并发访问或修改
+  - 资源管理：IO/连接/文件等资源未释放、未使用 try-with-resources 或等效的资源关闭机制
+  - 性能：不必要的重复计算、循环中的昂贵操作
+  - 可维护性：重复逻辑、函数职责过重、命名歧义、对外暴露内部可变状态
 
 请审查文件"${file.to}"中的以下代码差异，并在撰写回复时将 Pull Request 标题和描述纳入考量。
 
@@ -240,6 +246,12 @@ function getAIResponse(prompt) {
         return provider.getReview(prompt);
     });
 }
+const SEVERITY_ORDER = { critical: 0, high: 1, medium: 2 };
+const SEVERITY_BADGE = {
+    critical: "🔴 **Critical**",
+    high: "🟠 **High**",
+    medium: "🔵 **Medium**",
+};
 function createFileComment(file, aiResponses) {
     if (!file.to)
         return [];
@@ -264,10 +276,12 @@ function createFileComment(file, aiResponses) {
     });
     if (validResponses.length === 0)
         return [];
+    // Sort by severity before rendering
+    const sorted = [...validResponses].sort((a, b) => { var _a, _b; return ((_a = SEVERITY_ORDER[a.severity]) !== null && _a !== void 0 ? _a : 2) - ((_b = SEVERITY_ORDER[b.severity]) !== null && _b !== void 0 ? _b : 2); });
     // Merge all comments into one, posted on the first mentioned line
-    const firstLine = Number(validResponses[0].lineNumber);
-    const mergedBody = validResponses
-        .map((r) => `**Line ${r.lineNumber}:** ${r.reviewComment}`)
+    const firstLine = Number(sorted[0].lineNumber);
+    const mergedBody = sorted
+        .map((r) => { var _a; return `${(_a = SEVERITY_BADGE[r.severity]) !== null && _a !== void 0 ? _a : SEVERITY_BADGE.medium} **Line ${r.lineNumber}:** ${r.reviewComment}`; })
         .join("\n\n");
     return [
         {

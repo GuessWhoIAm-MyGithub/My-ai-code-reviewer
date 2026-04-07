@@ -1,6 +1,7 @@
 export interface ReviewComment {
   lineNumber: string;
   reviewComment: string;
+  severity: "critical" | "high" | "medium";
 }
 
 export interface AIProvider {
