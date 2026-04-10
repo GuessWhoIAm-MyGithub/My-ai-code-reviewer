@@ -128,6 +128,22 @@ async function getDiff(
   return response.data;
 }
 
+async function getChangedFilesBetweenCommits(
+  owner: string,
+  repo: string,
+  baseSha: string,
+  headSha: string
+): Promise<Set<string>> {
+  const response = await octokit.repos.compareCommits({
+    owner,
+    repo,
+    base: baseSha,
+    head: headSha,
+  });
+  const files = response.data.files ?? [];
+  return new Set(files.map((f) => f.filename));
+}
+
 async function analyzeCode(
   parsedDiff: File[],
   prDetails: PRDetails
@@ -367,27 +383,12 @@ async function main() {
     readFileSync(process.env.GITHUB_EVENT_PATH ?? "", "utf8")
   );
 
-  if (eventData.action === "opened") {
+  if (eventData.action === "opened" || eventData.action === "synchronize") {
     diff = await getDiff(
       prDetails.owner,
       prDetails.repo,
       prDetails.pull_number
     );
-  } else if (eventData.action === "synchronize") {
-    const newBaseSha = eventData.before;
-    const newHeadSha = eventData.after;
-
-    const response = await octokit.repos.compareCommits({
-      headers: {
-        accept: "application/vnd.github.v3.diff",
-      },
-      owner: prDetails.owner,
-      repo: prDetails.repo,
-      base: newBaseSha,
-      head: newHeadSha,
-    });
-
-    diff = String(response.data);
   } else {
     console.log("Unsupported event:", process.env.GITHUB_EVENT_NAME);
     return;
@@ -405,11 +406,31 @@ async function main() {
     .split(",")
     .map((s) => s.trim());
 
-  const filteredDiff = parsedDiff.filter((file) => {
+  let filteredDiff = parsedDiff.filter((file) => {
     return !excludePatterns.some((pattern) =>
       minimatch(file.to ?? "", pattern)
     );
   });
+
+  // 对 synchronize 事件，只审查本次 push 中变更的文件，避免重复审查
+  if (eventData.action === "synchronize") {
+    try {
+      const changedFiles = await getChangedFilesBetweenCommits(
+        prDetails.owner,
+        prDetails.repo,
+        eventData.before,
+        eventData.after
+      );
+      filteredDiff = filteredDiff.filter((file) =>
+        changedFiles.has(file.to ?? "")
+      );
+    } catch (e) {
+      console.warn(
+        "Could not determine incremental changes, reviewing all files:",
+        e instanceof Error ? e.message : e
+      );
+    }
+  }
 
   const comments = await analyzeCode(filteredDiff, prDetails);
   if (comments.length > 0) {

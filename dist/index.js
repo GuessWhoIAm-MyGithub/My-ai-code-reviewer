@@ -146,6 +146,19 @@ function getDiff(owner, repo, pull_number) {
         return response.data;
     });
 }
+function getChangedFilesBetweenCommits(owner, repo, baseSha, headSha) {
+    var _a;
+    return __awaiter(this, void 0, void 0, function* () {
+        const response = yield octokit.repos.compareCommits({
+            owner,
+            repo,
+            base: baseSha,
+            head: headSha,
+        });
+        const files = (_a = response.data.files) !== null && _a !== void 0 ? _a : [];
+        return new Set(files.map((f) => f.filename));
+    });
+}
 function analyzeCode(parsedDiff, prDetails) {
     return __awaiter(this, void 0, void 0, function* () {
         const comments = [];
@@ -345,22 +358,8 @@ function main() {
         const prDetails = yield getPRDetails();
         let diff;
         const eventData = JSON.parse((0, fs_1.readFileSync)((_a = process.env.GITHUB_EVENT_PATH) !== null && _a !== void 0 ? _a : "", "utf8"));
-        if (eventData.action === "opened") {
+        if (eventData.action === "opened" || eventData.action === "synchronize") {
             diff = yield getDiff(prDetails.owner, prDetails.repo, prDetails.pull_number);
-        }
-        else if (eventData.action === "synchronize") {
-            const newBaseSha = eventData.before;
-            const newHeadSha = eventData.after;
-            const response = yield octokit.repos.compareCommits({
-                headers: {
-                    accept: "application/vnd.github.v3.diff",
-                },
-                owner: prDetails.owner,
-                repo: prDetails.repo,
-                base: newBaseSha,
-                head: newHeadSha,
-            });
-            diff = String(response.data);
         }
         else {
             console.log("Unsupported event:", process.env.GITHUB_EVENT_NAME);
@@ -375,9 +374,19 @@ function main() {
             .getInput("exclude")
             .split(",")
             .map((s) => s.trim());
-        const filteredDiff = parsedDiff.filter((file) => {
+        let filteredDiff = parsedDiff.filter((file) => {
             return !excludePatterns.some((pattern) => { var _a; return (0, minimatch_1.default)((_a = file.to) !== null && _a !== void 0 ? _a : "", pattern); });
         });
+        // 对 synchronize 事件，只审查本次 push 中变更的文件，避免重复审查
+        if (eventData.action === "synchronize") {
+            try {
+                const changedFiles = yield getChangedFilesBetweenCommits(prDetails.owner, prDetails.repo, eventData.before, eventData.after);
+                filteredDiff = filteredDiff.filter((file) => { var _a; return changedFiles.has((_a = file.to) !== null && _a !== void 0 ? _a : ""); });
+            }
+            catch (e) {
+                console.warn("Could not determine incremental changes, reviewing all files:", e instanceof Error ? e.message : e);
+            }
+        }
         const comments = yield analyzeCode(filteredDiff, prDetails);
         if (comments.length > 0) {
             yield createReviewComment(prDetails.owner, prDetails.repo, prDetails.pull_number, comments);
