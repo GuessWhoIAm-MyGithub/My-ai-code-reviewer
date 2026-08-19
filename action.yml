@@ -21,9 +21,9 @@ inputs:
     required: false
     default: ""
   MAX_TOKENS:
-    description: "Maximum number of tokens for the AI model response."
+    description: "Maximum number of tokens for the AI model response. Raise for endpoints that accept larger outputs (e.g. 131072 for Anthropic-compatible endpoints with 512K context)."
     required: false
-    default: "131072"
+    default: "20480"
   CONTEXT_WINDOW_TOKENS:
     description: "Approximate token budget per review batch (prompt instructions + diffs + file context + reference files) sent to the AI model."
     required: false

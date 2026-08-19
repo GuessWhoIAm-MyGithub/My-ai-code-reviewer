@@ -90,18 +90,28 @@ function normalizeRepoPath(p) {
 function resolveImportSpecifier(fromPath, spec, candidatePaths) {
     const lang = languageOf(fromPath);
     if (lang === "go" || lang === "jvm") {
-        // Module-path style imports: match by path suffix (package dir for Go,
-        // dotted class path for Java/Kotlin)
-        const dotted = spec.replace(/\./g, "/").replace(/\/\*$/, "");
+        // Module-path style imports matched by path suffix, each with its own
+        // direction: Go module paths ("github.com/org/repo/pkg") contain the
+        // repo-relative package dir; JVM class imports ("a.b.C") match the file
+        // path; JVM wildcard imports ("a.b.*") name a package that the
+        // candidate's directory must end with.
+        const wildcard = /\.\*$/.test(spec);
+        const dotted = spec.replace(/\.\*$/, "").replace(/\./g, "/");
+        const dirOf = (p) => p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "";
         for (const p of candidatePaths) {
-            const noExt = p.replace(/\.[^.]+$/, "");
-            if (lang === "jvm") {
-                if (noExt === dotted || noExt.endsWith("/" + dotted))
+            if (lang === "go") {
+                const dir = dirOf(p);
+                if (dir && (dotted === dir || dotted.endsWith("/" + dir)))
+                    return p;
+            }
+            else if (wildcard) {
+                const dir = dirOf(p);
+                if (dir && (dir === dotted || dir.endsWith("/" + dotted)))
                     return p;
             }
             else {
-                const dir = p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "";
-                if (dir && (dotted === dir || dotted.endsWith("/" + dir)))
+                const noExt = p.replace(/\.[^.]+$/, "");
+                if (noExt === dotted || noExt.endsWith("/" + dotted))
                     return p;
             }
         }
@@ -406,11 +416,10 @@ const API_KEY = core.getInput("API_KEY") || core.getInput("OPENAI_API_KEY");
 const API_MODEL = core.getInput("API_MODEL") || core.getInput("OPENAI_API_MODEL") || "gpt-4";
 const API_PROVIDER = core.getInput("API_PROVIDER") || "openai";
 const API_BASE_URL = core.getInput("API_BASE_URL") || "";
-// Response (output) token cap. Sized generously for multi-file batch reviews
-// where a single JSON response covers every file in the batch. 131072 is the
-// largest value Anthropic-compatible endpoints accept (input 256K + output
-// 128K still fits a 512K context window).
-const MAX_TOKENS = parseInt(core.getInput("MAX_TOKENS") || "131072", 10);
+// Response (output) token cap. 20480 works with every provider's default
+// model; raise it via the MAX_TOKENS input for endpoints that accept larger
+// outputs (e.g. 131072 on Anthropic-compatible endpoints with 512K context).
+const MAX_TOKENS = parseInt(core.getInput("MAX_TOKENS") || "20480", 10);
 // Approximate token budget (prompt instructions + diffs + file context +
 // reference files) per review batch. Defaults sized for a 256K-input model so
 // a typical PR is reviewed in a single cross-file call.
@@ -735,7 +744,7 @@ function reviewBatch(batch, allFiles, contents, specifiersOf, repoTree, changedP
         }
         const comments = [];
         for (const file of batch) {
-            comments.push(...createFileComment(file, (_d = byFile.get(file.to)) !== null && _d !== void 0 ? _d : []));
+            comments.push(...createFindingComments(file, (_d = byFile.get(file.to)) !== null && _d !== void 0 ? _d : []));
         }
         return comments;
     });
@@ -761,10 +770,11 @@ function createBatchPrompt(files, prDetails, contexts, diffTexts, references, ch
         : "";
     return `你的任务是审查 Pull Request 中的多个相互关联的文件。指令如下：
 - 只输出 JSON，不要输出任何自然语言描述、前言或解释。
-- 以如下 JSON 格式返回结果：{"reviews": [{"file": "<文件路径>", "lineNumber": <行号>, "severity": "<critical|high|medium>", "reviewComment": "<审查意见>"}]}
+- 以如下 JSON 格式返回结果：{"reviews": [{"file": "<文件路径>", "lineNumber": <行号>, "severity": "<critical|high|medium>", "reviewComment": "<审查意见>", "relatedFiles": ["<相关文件路径>"]}]}
   - critical：必然触发的问题——代码逻辑本身就是错的，只要执行到此处就会崩溃或产生错误结果（空指针解引用、数组越界、整数截断导致计算错误、逻辑判断反向等）
   - high：条件触发的严重问题——需要特定场景才暴露，但一旦触发影响严重（并发访问导致的竞态或数据损坏、资源泄漏积累导致耗尽、内部可变状态被外部修改导致不一致等）
   - medium：不触发失败但增加风险的问题——当前不会出错，但让代码更脆弱或难以维护（封装不当、命名歧义、职责过重等）
+- relatedFiles：当问题涉及多个文件（跨文件联动问题）时，列出所有涉及文件的完整路径（file 字段所指文件也包含在内）；单文件问题返回空数组。
 - file 字段必须原样复制下方"待审查文件列表"中列出的某个路径，绝对不要编造列表之外的文件。
 - lineNumber 必须是 file 字段所指文件的新文件行号（标有"+"或空格的行），不能是被删除的行（标有"-"的行）。
 - 只对新增（"+"）或上下文（" "）行进行评论，不对删除（"-"）行发表评论，也不对参考文件发表评论。
@@ -829,10 +839,13 @@ const SEVERITY_BADGE = {
     high: "🟠 **High**",
     medium: "🔵 **Medium**",
 };
-function createFileComment(file, aiResponses) {
-    if (!file.to || aiResponses.length === 0)
+// One review comment per finding, anchored to the finding's own line when it
+// is a valid new-file line (the file's first changed line otherwise).
+// Cross-file findings append the list of files they involve.
+function createFindingComments(file, findings) {
+    if (!file.to || findings.length === 0)
         return [];
-    // Valid new-file line numbers across all chunks, used for "Line N" references
+    // Valid new-file line numbers across all chunks, used for anchoring
     const validLines = new Set();
     for (const chunk of file.chunks) {
         for (const change of chunk.changes) {
@@ -842,22 +855,25 @@ function createFileComment(file, aiResponses) {
             }
         }
     }
-    // Sort by severity before rendering
-    const sorted = [...aiResponses].sort((a, b) => { var _a, _b; return ((_a = SEVERITY_ORDER[a.severity]) !== null && _a !== void 0 ? _a : 2) - ((_b = SEVERITY_ORDER[b.severity]) !== null && _b !== void 0 ? _b : 2); });
-    // Merge everything into a single file-level comment; keep line references
-    // only where they point at an actual new-file line
-    const mergedBody = sorted
-        .map((r) => {
-        var _a;
+    const fallbackAnchor = validLines.size ? Math.min(...validLines) : undefined;
+    // Post the most severe findings first
+    const sorted = [...findings].sort((a, b) => { var _a, _b; return ((_a = SEVERITY_ORDER[a.severity]) !== null && _a !== void 0 ? _a : 2) - ((_b = SEVERITY_ORDER[b.severity]) !== null && _b !== void 0 ? _b : 2); });
+    return sorted.map((r) => {
+        var _a, _b;
         const badge = (_a = SEVERITY_BADGE[r.severity]) !== null && _a !== void 0 ? _a : SEVERITY_BADGE.medium;
         const line = Number(r.lineNumber);
-        const lineRef = validLines.has(line) ? ` **Line ${line}:**` : "";
-        return `${badge}${lineRef} ${r.reviewComment}`;
-    })
-        .join("\n\n");
-    // Anchor line for the review comment: the file's first changed line
-    const anchorLine = validLines.size ? Math.min(...validLines) : undefined;
-    return [{ body: mergedBody, path: file.to, line: anchorLine }];
+        const anchored = validLines.has(line) ? line : undefined;
+        const lineRef = anchored != null ? ` **Line ${anchored}:**` : "";
+        const related = ((_b = r.relatedFiles) !== null && _b !== void 0 ? _b : []).filter((f) => typeof f === "string" && f);
+        const relatedSection = related.length
+            ? `\n\n**相关文件：** ${related.map((f) => `\`${f}\``).join("、")}`
+            : "";
+        return {
+            body: `${badge}${lineRef} ${r.reviewComment}${relatedSection}`,
+            path: file.to,
+            line: anchored !== null && anchored !== void 0 ? anchored : fallbackAnchor,
+        };
+    });
 }
 function getMergeSuggestion(prDetails, files, comments) {
     return __awaiter(this, void 0, void 0, function* () {

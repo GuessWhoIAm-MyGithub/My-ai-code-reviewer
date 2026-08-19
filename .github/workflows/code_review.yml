@@ -34,6 +34,7 @@ jobs:
           API_PROVIDER: "anthropic"
           API_MODEL: ${{ secrets.MODEL_NAME }}
           API_BASE_URL: ${{ secrets.BASE_URL }}
+          MAX_TOKENS: "131072"
           exclude: "yarn.lock,dist/**"
 
       # Option 3: Google Gemini

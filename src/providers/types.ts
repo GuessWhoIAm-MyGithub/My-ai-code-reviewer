@@ -2,6 +2,9 @@ export interface ReviewComment {
   // File path the finding belongs to; required for multi-file batch reviews,
   // absent for legacy single-file reviews
   file?: string;
+  // Other files involved in the finding (cross-file consistency issues);
+  // absent for single-file findings
+  relatedFiles?: string[];
   lineNumber: string;
   reviewComment: string;
   severity: "critical" | "high" | "medium";
