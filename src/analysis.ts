@@ -337,7 +337,7 @@ export function selectCallerCandidates(
 
 // One line per changed file (+adds/-dels), shown in every batch prompt so the
 // model knows the full scope of the PR even when it spans several batches.
-export function summarizeChangedFiles(files: File[]): string {
+export function summarizeChangedFileList(files: File[]): string {
   return files
     .map((f) => {
       let add = 0;
