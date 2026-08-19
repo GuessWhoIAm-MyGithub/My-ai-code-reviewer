@@ -152,6 +152,10 @@ async function getRepoTree(
   }
 }
 
+// Invisible HTML marker appended to every comment this action posts, so its
+// own comments can be recognized later regardless of which token posted them
+const COMMENT_MARKER = "<!-- ai-code-reviewer -->";
+
 const PROMPT_OVERHEAD_TOKENS = 2000; // prompt instructions + PR title/description
 const CONTEXT_LINES = 20; // unchanged lines of surrounding code kept around each hunk
 // estimateTokens() assumes ~4 chars/token, which underestimates CJK-heavy
@@ -700,7 +704,7 @@ function createFindingComments(
       ? `\n\n**相关文件：** ${related.map((f) => `\`${f}\``).join("、")}`
       : "";
     return {
-      body: `${badge}${lineRef} ${r.reviewComment}${relatedSection}`,
+      body: `${badge}${lineRef} ${r.reviewComment}${relatedSection}\n${COMMENT_MARKER}`,
       path: file.to!,
       line: anchored ?? fallbackAnchor,
     };
@@ -781,6 +785,108 @@ async function createReviewComment(
   });
 }
 
+// --- Fix-status tracking -----------------------------------------------------
+// On every push the reviewer re-reviews the files that changed. After posting
+// fresh comments it resolves this action's own previous unresolved threads on
+// those files: a resolved-without-reflag thread means the issue was fixed;
+// an issue that persists is re-flagged by the new review, so the PR's open
+// threads always reflect the current state of the code.
+
+interface ReviewThreadInfo {
+  id: string;
+  path: string;
+}
+
+async function getOpenReviewThreads(
+  owner: string,
+  repo: string,
+  pull_number: number
+): Promise<ReviewThreadInfo[]> {
+  const threads: Array<{
+    id: string;
+    isResolved: boolean;
+    path: string;
+    comments: { nodes: Array<{ body?: string }> };
+  }> = [];
+  let after: string | null = null;
+  try {
+    do {
+      const data = (await octokit.graphql(
+        `query($owner: String!, $name: String!, $number: Int!, $after: String) {
+          repository(owner: $owner, name: $name) {
+            pullRequest(number: $number) {
+              reviewThreads(first: 50, after: $after) {
+                pageInfo { hasNextPage endCursor }
+                nodes {
+                  id
+                  isResolved
+                  path
+                  comments(first: 5) { nodes { body } }
+                }
+              }
+            }
+          }
+        }`,
+        { owner, name: repo, number: pull_number, after }
+      )) as {
+        repository: {
+          pullRequest: {
+            reviewThreads: {
+              pageInfo: { hasNextPage: boolean; endCursor: string };
+              nodes: typeof threads;
+            };
+          };
+        };
+      };
+      const rt = data.repository.pullRequest.reviewThreads;
+      threads.push(...rt.nodes);
+      after = rt.pageInfo.hasNextPage ? rt.pageInfo.endCursor : null;
+    } while (after);
+  } catch (e) {
+    console.warn(
+      "Could not fetch previous review threads:",
+      e instanceof Error ? e.message : e
+    );
+    return [];
+  }
+  return threads
+    .filter(
+      (t) =>
+        !t.isResolved &&
+        t.comments.nodes.some((c) => c.body?.includes(COMMENT_MARKER))
+    )
+    .map((t) => ({ id: t.id, path: t.path }));
+}
+
+async function resolveReviewedThreads(
+  threads: ReviewThreadInfo[],
+  reviewedPaths: Set<string>
+): Promise<void> {
+  const outdated = threads.filter((t) => reviewedPaths.has(t.path));
+  for (const thread of outdated) {
+    try {
+      await octokit.graphql(
+        `mutation($threadId: ID!) {
+          resolveReviewThread(input: { threadId: $threadId }) {
+            thread { isResolved }
+          }
+        }`,
+        { threadId: thread.id }
+      );
+    } catch (e) {
+      console.warn(
+        `Could not resolve previous thread on ${thread.path}:`,
+        e instanceof Error ? e.message : e
+      );
+    }
+  }
+  if (outdated.length > 0) {
+    console.log(
+      `Resolved ${outdated.length} previous review thread(s) on re-reviewed files`
+    );
+  }
+}
+
 async function main() {
   const prDetails = await getPRDetails();
   let diff: string | null;
@@ -837,6 +943,14 @@ async function main() {
     }
   }
 
+  // Snapshot this action's open threads BEFORE posting new comments so the
+  // fresh comments are not included in the resolve set
+  const previousThreads = await getOpenReviewThreads(
+    prDetails.owner,
+    prDetails.repo,
+    prDetails.pull_number
+  );
+
   const comments = await analyzeCode(filteredDiff, prDetails);
   if (comments.length > 0) {
     await createReviewComment(
@@ -847,19 +961,53 @@ async function main() {
     );
   }
 
-  // Post merge suggestion as a top-level PR comment
+  // Resolve previous findings on the files just re-reviewed: fixed issues
+  // stay resolved, still-present ones were re-flagged by the new review
+  const reviewedPaths = new Set(
+    filteredDiff
+      .map((f) => f.to ?? "")
+      .filter((p) => p && p !== "/dev/null")
+  );
+  await resolveReviewedThreads(previousThreads, reviewedPaths);
+
+  // Merge suggestion: keep a single up-to-date comment instead of one per push
   const mergeSuggestion = await getMergeSuggestion(
     prDetails,
     filteredDiff,
     comments
   );
   if (mergeSuggestion) {
-    await octokit.issues.createComment({
-      owner: prDetails.owner,
-      repo: prDetails.repo,
-      issue_number: prDetails.pull_number,
-      body: mergeSuggestion,
-    });
+    const body = `${mergeSuggestion}\n${COMMENT_MARKER}`;
+    try {
+      const existing = await octokit.issues.listComments({
+        owner: prDetails.owner,
+        repo: prDetails.repo,
+        issue_number: prDetails.pull_number,
+      });
+      const previous = existing.data
+        .filter((c) => c.body?.includes(COMMENT_MARKER))
+        .pop();
+      if (previous) {
+        await octokit.issues.updateComment({
+          owner: prDetails.owner,
+          repo: prDetails.repo,
+          comment_id: previous.id,
+          body,
+        });
+      } else {
+        await octokit.issues.createComment({
+          owner: prDetails.owner,
+          repo: prDetails.repo,
+          issue_number: prDetails.pull_number,
+          body,
+        });
+      }
+    } catch (e) {
+      console.warn(
+        "Could not update merge suggestion comment:",
+        e instanceof Error ? e.message : e
+      );
+    }
   }
 }
 

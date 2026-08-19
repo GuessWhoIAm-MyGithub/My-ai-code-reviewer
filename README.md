@@ -140,7 +140,8 @@ The AI Code Reviewer GitHub Action:
 3. Groups the changed files into review batches: files linked by import relationships (or sharing a directory) are reviewed together in a single AI request, so cross-file consistency issues (a changed function signature vs. its callers, renamed constants/types, module contracts) can be detected. With the default 256K budget a typical PR is reviewed in one single request; oversized PRs are split, evicting the least-connected files first.
 4. Additionally fetches a small number of unchanged related files (callers of the changed code and modules it depends on) and includes them as read-only reference context, which surfaces breaking changes like "the interface changed but this usage was not updated".
 5. Skips files for which the AI finds nothing worth flagging.
-6. Posts one line-anchored review comment per finding — cross-file findings list all files they involve — plus a top-level merge suggestion on the PR.
+6. Posts one line-anchored review comment per finding — cross-file findings list all files they involve — and keeps a single up-to-date merge suggestion comment on the PR.
+7. On follow-up pushes, files changed in the push are re-reviewed and the action's previous review threads on those files are automatically resolved: a resolved thread that is not re-flagged means the issue was fixed, while still-present issues get fresh comments — so the PR's open threads always reflect the current state of the code.
 
 ## Contributing
 

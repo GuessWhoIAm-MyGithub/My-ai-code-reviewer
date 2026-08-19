@@ -530,6 +530,9 @@ function getRepoTree(owner, repo, ref) {
         }
     });
 }
+// Invisible HTML marker appended to every comment this action posts, so its
+// own comments can be recognized later regardless of which token posted them
+const COMMENT_MARKER = "<!-- ai-code-reviewer -->";
 const PROMPT_OVERHEAD_TOKENS = 2000; // prompt instructions + PR title/description
 const CONTEXT_LINES = 20; // unchanged lines of surrounding code kept around each hunk
 // estimateTokens() assumes ~4 chars/token, which underestimates CJK-heavy
@@ -928,7 +931,7 @@ function createFindingComments(file, findings) {
             ? `\n\n**相关文件：** ${related.map((f) => `\`${f}\``).join("、")}`
             : "";
         return {
-            body: `${badge}${lineRef} ${r.reviewComment}${relatedSection}`,
+            body: `${badge}${lineRef} ${r.reviewComment}${relatedSection}\n${COMMENT_MARKER}`,
             path: file.to,
             line: anchored !== null && anchored !== void 0 ? anchored : fallbackAnchor,
         };
@@ -996,6 +999,62 @@ function createReviewComment(owner, repo, pull_number, comments) {
         });
     });
 }
+function getOpenReviewThreads(owner, repo, pull_number) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const threads = [];
+        let after = null;
+        try {
+            do {
+                const data = (yield octokit.graphql(`query($owner: String!, $name: String!, $number: Int!, $after: String) {
+          repository(owner: $owner, name: $name) {
+            pullRequest(number: $number) {
+              reviewThreads(first: 50, after: $after) {
+                pageInfo { hasNextPage endCursor }
+                nodes {
+                  id
+                  isResolved
+                  path
+                  comments(first: 5) { nodes { body } }
+                }
+              }
+            }
+          }
+        }`, { owner, name: repo, number: pull_number, after }));
+                const rt = data.repository.pullRequest.reviewThreads;
+                threads.push(...rt.nodes);
+                after = rt.pageInfo.hasNextPage ? rt.pageInfo.endCursor : null;
+            } while (after);
+        }
+        catch (e) {
+            console.warn("Could not fetch previous review threads:", e instanceof Error ? e.message : e);
+            return [];
+        }
+        return threads
+            .filter((t) => !t.isResolved &&
+            t.comments.nodes.some((c) => { var _a; return (_a = c.body) === null || _a === void 0 ? void 0 : _a.includes(COMMENT_MARKER); }))
+            .map((t) => ({ id: t.id, path: t.path }));
+    });
+}
+function resolveReviewedThreads(threads, reviewedPaths) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const outdated = threads.filter((t) => reviewedPaths.has(t.path));
+        for (const thread of outdated) {
+            try {
+                yield octokit.graphql(`mutation($threadId: ID!) {
+          resolveReviewThread(input: { threadId: $threadId }) {
+            thread { isResolved }
+          }
+        }`, { threadId: thread.id });
+            }
+            catch (e) {
+                console.warn(`Could not resolve previous thread on ${thread.path}:`, e instanceof Error ? e.message : e);
+            }
+        }
+        if (outdated.length > 0) {
+            console.log(`Resolved ${outdated.length} previous review thread(s) on re-reviewed files`);
+        }
+    });
+}
 function main() {
     var _a;
     return __awaiter(this, void 0, void 0, function* () {
@@ -1031,19 +1090,52 @@ function main() {
                 console.warn("Could not determine incremental changes, reviewing all files:", e instanceof Error ? e.message : e);
             }
         }
+        // Snapshot this action's open threads BEFORE posting new comments so the
+        // fresh comments are not included in the resolve set
+        const previousThreads = yield getOpenReviewThreads(prDetails.owner, prDetails.repo, prDetails.pull_number);
         const comments = yield analyzeCode(filteredDiff, prDetails);
         if (comments.length > 0) {
             yield createReviewComment(prDetails.owner, prDetails.repo, prDetails.pull_number, comments);
         }
-        // Post merge suggestion as a top-level PR comment
+        // Resolve previous findings on the files just re-reviewed: fixed issues
+        // stay resolved, still-present ones were re-flagged by the new review
+        const reviewedPaths = new Set(filteredDiff
+            .map((f) => { var _a; return (_a = f.to) !== null && _a !== void 0 ? _a : ""; })
+            .filter((p) => p && p !== "/dev/null"));
+        yield resolveReviewedThreads(previousThreads, reviewedPaths);
+        // Merge suggestion: keep a single up-to-date comment instead of one per push
         const mergeSuggestion = yield getMergeSuggestion(prDetails, filteredDiff, comments);
         if (mergeSuggestion) {
-            yield octokit.issues.createComment({
-                owner: prDetails.owner,
-                repo: prDetails.repo,
-                issue_number: prDetails.pull_number,
-                body: mergeSuggestion,
-            });
+            const body = `${mergeSuggestion}\n${COMMENT_MARKER}`;
+            try {
+                const existing = yield octokit.issues.listComments({
+                    owner: prDetails.owner,
+                    repo: prDetails.repo,
+                    issue_number: prDetails.pull_number,
+                });
+                const previous = existing.data
+                    .filter((c) => { var _a; return (_a = c.body) === null || _a === void 0 ? void 0 : _a.includes(COMMENT_MARKER); })
+                    .pop();
+                if (previous) {
+                    yield octokit.issues.updateComment({
+                        owner: prDetails.owner,
+                        repo: prDetails.repo,
+                        comment_id: previous.id,
+                        body,
+                    });
+                }
+                else {
+                    yield octokit.issues.createComment({
+                        owner: prDetails.owner,
+                        repo: prDetails.repo,
+                        issue_number: prDetails.pull_number,
+                        body,
+                    });
+                }
+            }
+            catch (e) {
+                console.warn("Could not update merge suggestion comment:", e instanceof Error ? e.message : e);
+            }
         }
     });
 }
