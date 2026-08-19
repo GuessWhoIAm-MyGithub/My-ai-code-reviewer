@@ -26,16 +26,22 @@ const PY_IMPORT_RES = [
   /^\s*import\s+([.\w]+)/gm,
 ];
 const JVM_IMPORT_RES = [/^\s*import\s+(?:static\s+)?([\w.]+)\s*;/gm];
+const SWIFT_IMPORT_RES = [/(?:@testable\s+)?import\s+([A-Za-z_][A-Za-z0-9_]*)/g];
+// Swift links files by symbol references, not file imports; type names
+// declared on changed lines identify what nearby files may be using
+const SWIFT_DECLARATION_RES =
+  /\b(?:struct|class|enum|protocol|actor|extension|typealias)\s+([A-Za-z_][A-Za-z0-9_]*)/g;
 
 export function languageOf(
   path: string
-): "js" | "python" | "go" | "jvm" | "unknown" {
+): "js" | "python" | "go" | "jvm" | "swift" | "unknown" {
   const ext = path.slice(path.lastIndexOf(".") + 1).toLowerCase();
   if (["ts", "tsx", "js", "jsx", "mjs", "cjs", "vue", "svelte"].includes(ext))
     return "js";
   if (ext === "py") return "python";
   if (ext === "go") return "go";
   if (["java", "kt", "kts"].includes(ext)) return "jvm";
+  if (ext === "swift") return "swift";
   return "unknown";
 }
 
@@ -61,6 +67,8 @@ export function extractImportSpecifiers(
     collect(/(?:^|\n)import\s+"([^"]+)"/g);
   } else if (lang === "jvm") {
     JVM_IMPORT_RES.forEach(collect);
+  } else if (lang === "swift") {
+    SWIFT_IMPORT_RES.forEach(collect);
   }
   return [...new Set(specs)];
 }
@@ -127,6 +135,17 @@ export function resolveImportSpecifier(
     return null;
   }
 
+  if (lang === "swift") {
+    // Only local SPM modules resolve to repo paths: "import MyKit" links to
+    // the target's sources directory; system frameworks (SwiftUI, ...) never
+    // match repo files
+    for (const p of candidatePaths) {
+      const target = p.match(/(?:^|\/)Sources\/([^/]+)\//);
+      if (target && target[1] === spec) return p;
+    }
+    return null;
+  }
+
   if (spec.startsWith(".")) {
     // Relative specifier (JS/TS)
     const base = fromPath.includes("/")
@@ -171,6 +190,30 @@ export function resolveImportSpecifier(
     }
   }
   return null;
+}
+
+// --- Symbol-reference linkage (Swift and other module-scoped languages) ----
+// Swift files in the same module reference each other by type name with no
+// import statement, so declared type names on changed lines are the linkage
+// signal for finding unchanged callers.
+
+export function extractDeclaredSymbols(text: string): string[] {
+  const names = new Set<string>();
+  for (const m of text.matchAll(SWIFT_DECLARATION_RES)) {
+    const name = m[1];
+    // Uppercase-initial names of decent length: types are the cross-file
+    // contract in Swift; lowercase members (body, name, ...) are ubiquitous
+    if (/^[A-Z]/.test(name) && name.length >= 4) names.add(name);
+  }
+  return [...names].slice(0, 80);
+}
+
+export function referencesAnySymbol(
+  content: string,
+  symbols: string[]
+): boolean {
+  if (symbols.length === 0) return false;
+  return new RegExp(`\\b(?:${symbols.join("|")})\\b`).test(content);
 }
 
 // --- Diff rendering ----------------------------------------------------------

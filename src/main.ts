@@ -8,6 +8,8 @@ import {
   estimateTokens,
   extractImportSpecifiers,
   resolveImportSpecifier,
+  extractDeclaredSymbols,
+  referencesAnySymbol,
   formatFileDiff,
   getNewFileLineNumber,
   buildReviewGroups,
@@ -329,13 +331,14 @@ async function analyzeCode(
 }
 
 // Discover unchanged repo files related to the batch: callers (files whose
-// imports resolve into the batch — they surface breaking changes like "the
-// signature changed but this usage was not updated") and forward dependencies
-// (modules the batch calls, kept for contract checking). All failures degrade
-// to "no references".
+// imports resolve into the batch, or — for module-scoped languages like Swift
+// that have no file-level imports — files referencing a type declared in the
+// batch's changed lines) and forward dependencies (modules the batch calls,
+// kept for contract checking). All failures degrade to "no references".
 async function findReferenceFiles(
   batch: File[],
   specifiersOf: Map<string, string[]>,
+  batchSymbols: string[],
   changedPaths: Set<string>,
   repoTree: string[],
   prDetails: PRDetails,
@@ -371,13 +374,15 @@ async function findReferenceFiles(
     if (found.size >= MAX_REFERENCES_PER_BATCH) break;
     const lines = await fetchLines(candidate);
     if (!lines) continue;
-    const importsBatch = extractImportSpecifiers(
+    const content = lines.join("\n");
+    const linkedToBatch = extractImportSpecifiers(
       candidate,
-      lines.join("\n")
-    ).some(
-      (spec) => resolveImportSpecifier(candidate, spec, batchPaths) != null
-    );
-    if (importsBatch) found.set(candidate, "caller");
+      content
+    ).some((spec) => resolveImportSpecifier(candidate, spec, batchPaths) != null);
+    // Swift-style fallback: no file imports exist, so a nearby file counts as
+    // a caller when it references a type declared in the batch's diff
+    const referencesBatchSymbol = referencesAnySymbol(content, batchSymbols);
+    if (linkedToBatch || referencesBatchSymbol) found.set(candidate, "caller");
   }
 
   if (found.size < MAX_REFERENCES_PER_BATCH) {
@@ -440,6 +445,19 @@ async function reviewBatch(
 
   const totalBudget = batchTokenBudget();
 
+  // Type names declared on added diff lines: the linkage signal for
+  // module-scoped languages (Swift) where files reference each other with no
+  // import statements
+  const addedLines: string[] = [];
+  for (const file of batch) {
+    for (const chunk of file.chunks) {
+      for (const change of chunk.changes) {
+        if (change.type === "add") addedLines.push(change.content);
+      }
+    }
+  }
+  const batchSymbols = extractDeclaredSymbols(addedLines.join("\n"));
+
   // Reference files get at most their budget share, and only if the diffs
   // leave meaningful room
   const references: ReferenceFile[] = [];
@@ -449,6 +467,7 @@ async function reviewBatch(
         ...(await findReferenceFiles(
           batch,
           specifiersOf,
+          batchSymbols,
           changedPaths,
           repoTree,
           prDetails,

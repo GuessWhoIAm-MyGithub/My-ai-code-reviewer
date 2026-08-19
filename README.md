@@ -5,7 +5,7 @@ AI Code Reviewer is a GitHub Action that leverages AI to provide intelligent fee
 ## Features
 
 - Reviews pull requests using OpenAI, Anthropic, or Google Gemini APIs.
-- Cross-file review: files linked by imports are reviewed together in a single request, with unchanged callers/dependencies included as reference context, to catch inconsistent linked changes.
+- Cross-file review: files linked by imports are reviewed together in a single request, with unchanged callers/dependencies included as reference context, to catch inconsistent linked changes. Linkage detection covers JS/TS, Python, Go, Java/Kotlin, and Swift (SPM module targets plus type-name references, since Swift files in one module link without imports).
 - Configurable AI provider, model, and base URL via workflow inputs.
 - Provides intelligent comments and suggestions for improving your code.
 - Filters out files that match specified exclude patterns.

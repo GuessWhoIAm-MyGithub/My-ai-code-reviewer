@@ -7,7 +7,7 @@ require('./sourcemap-register.js');/******/ (() => { // webpackBootstrap
 "use strict";
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.summarizeChangedFiles = exports.selectCallerCandidates = exports.buildReviewGroups = exports.formatFileDiff = exports.getNewFileLineNumber = exports.resolveImportSpecifier = exports.extractImportSpecifiers = exports.languageOf = exports.estimateTokens = exports.MAX_REFERENCES_PER_BATCH = exports.MAX_REFERENCE_CANDIDATES = void 0;
+exports.summarizeChangedFiles = exports.selectCallerCandidates = exports.buildReviewGroups = exports.formatFileDiff = exports.getNewFileLineNumber = exports.referencesAnySymbol = exports.extractDeclaredSymbols = exports.resolveImportSpecifier = exports.extractImportSpecifiers = exports.languageOf = exports.estimateTokens = exports.MAX_REFERENCES_PER_BATCH = exports.MAX_REFERENCE_CANDIDATES = void 0;
 // Pure cross-file analysis helpers: import heuristics, diff rendering, and
 // review-batch grouping. No IO here so everything is directly testable.
 // Repo files scanned for reverse references (callers) per batch
@@ -31,6 +31,10 @@ const PY_IMPORT_RES = [
     /^\s*import\s+([.\w]+)/gm,
 ];
 const JVM_IMPORT_RES = [/^\s*import\s+(?:static\s+)?([\w.]+)\s*;/gm];
+const SWIFT_IMPORT_RES = [/(?:@testable\s+)?import\s+([A-Za-z_][A-Za-z0-9_]*)/g];
+// Swift links files by symbol references, not file imports; type names
+// declared on changed lines identify what nearby files may be using
+const SWIFT_DECLARATION_RES = /\b(?:struct|class|enum|protocol|actor|extension|typealias)\s+([A-Za-z_][A-Za-z0-9_]*)/g;
 function languageOf(path) {
     const ext = path.slice(path.lastIndexOf(".") + 1).toLowerCase();
     if (["ts", "tsx", "js", "jsx", "mjs", "cjs", "vue", "svelte"].includes(ext))
@@ -41,6 +45,8 @@ function languageOf(path) {
         return "go";
     if (["java", "kt", "kts"].includes(ext))
         return "jvm";
+    if (ext === "swift")
+        return "swift";
     return "unknown";
 }
 exports.languageOf = languageOf;
@@ -69,6 +75,9 @@ function extractImportSpecifiers(filePath, content) {
     }
     else if (lang === "jvm") {
         JVM_IMPORT_RES.forEach(collect);
+    }
+    else if (lang === "swift") {
+        SWIFT_IMPORT_RES.forEach(collect);
     }
     return [...new Set(specs)];
 }
@@ -135,6 +144,17 @@ function resolveImportSpecifier(fromPath, spec, candidatePaths) {
         }
         return null;
     }
+    if (lang === "swift") {
+        // Only local SPM modules resolve to repo paths: "import MyKit" links to
+        // the target's sources directory; system frameworks (SwiftUI, ...) never
+        // match repo files
+        for (const p of candidatePaths) {
+            const target = p.match(/(?:^|\/)Sources\/([^/]+)\//);
+            if (target && target[1] === spec)
+                return p;
+        }
+        return null;
+    }
     if (spec.startsWith(".")) {
         // Relative specifier (JS/TS)
         const base = fromPath.includes("/")
@@ -182,6 +202,28 @@ function resolveImportSpecifier(fromPath, spec, candidatePaths) {
     return null;
 }
 exports.resolveImportSpecifier = resolveImportSpecifier;
+// --- Symbol-reference linkage (Swift and other module-scoped languages) ----
+// Swift files in the same module reference each other by type name with no
+// import statement, so declared type names on changed lines are the linkage
+// signal for finding unchanged callers.
+function extractDeclaredSymbols(text) {
+    const names = new Set();
+    for (const m of text.matchAll(SWIFT_DECLARATION_RES)) {
+        const name = m[1];
+        // Uppercase-initial names of decent length: types are the cross-file
+        // contract in Swift; lowercase members (body, name, ...) are ubiquitous
+        if (/^[A-Z]/.test(name) && name.length >= 4)
+            names.add(name);
+    }
+    return [...names].slice(0, 80);
+}
+exports.extractDeclaredSymbols = extractDeclaredSymbols;
+function referencesAnySymbol(content, symbols) {
+    if (symbols.length === 0)
+        return false;
+    return new RegExp(`\\b(?:${symbols.join("|")})\\b`).test(content);
+}
+exports.referencesAnySymbol = referencesAnySymbol;
 // --- Diff rendering ----------------------------------------------------------
 function getNewFileLineNumber(change) {
     switch (change.type) {
@@ -610,11 +652,11 @@ function analyzeCode(parsedDiff, prDetails) {
     });
 }
 // Discover unchanged repo files related to the batch: callers (files whose
-// imports resolve into the batch — they surface breaking changes like "the
-// signature changed but this usage was not updated") and forward dependencies
-// (modules the batch calls, kept for contract checking). All failures degrade
-// to "no references".
-function findReferenceFiles(batch, specifiersOf, changedPaths, repoTree, prDetails, tokenBudget, fetchCache) {
+// imports resolve into the batch, or — for module-scoped languages like Swift
+// that have no file-level imports — files referencing a type declared in the
+// batch's changed lines) and forward dependencies (modules the batch calls,
+// kept for contract checking). All failures degrade to "no references".
+function findReferenceFiles(batch, specifiersOf, batchSymbols, changedPaths, repoTree, prDetails, tokenBudget, fetchCache) {
     var _a;
     return __awaiter(this, void 0, void 0, function* () {
         const batchPaths = new Set(batch.map((f) => f.to));
@@ -633,8 +675,12 @@ function findReferenceFiles(batch, specifiersOf, changedPaths, repoTree, prDetai
             const lines = yield fetchLines(candidate);
             if (!lines)
                 continue;
-            const importsBatch = (0, analysis_1.extractImportSpecifiers)(candidate, lines.join("\n")).some((spec) => (0, analysis_1.resolveImportSpecifier)(candidate, spec, batchPaths) != null);
-            if (importsBatch)
+            const content = lines.join("\n");
+            const linkedToBatch = (0, analysis_1.extractImportSpecifiers)(candidate, content).some((spec) => (0, analysis_1.resolveImportSpecifier)(candidate, spec, batchPaths) != null);
+            // Swift-style fallback: no file imports exist, so a nearby file counts as
+            // a caller when it references a type declared in the batch's diff
+            const referencesBatchSymbol = (0, analysis_1.referencesAnySymbol)(content, batchSymbols);
+            if (linkedToBatch || referencesBatchSymbol)
                 found.set(candidate, "caller");
         }
         if (found.size < analysis_1.MAX_REFERENCES_PER_BATCH) {
@@ -689,12 +735,25 @@ function reviewBatch(batch, allFiles, contents, specifiersOf, repoTree, changedP
             diffTokens += (0, analysis_1.estimateTokens)(text);
         }
         const totalBudget = batchTokenBudget();
+        // Type names declared on added diff lines: the linkage signal for
+        // module-scoped languages (Swift) where files reference each other with no
+        // import statements
+        const addedLines = [];
+        for (const file of batch) {
+            for (const chunk of file.chunks) {
+                for (const change of chunk.changes) {
+                    if (change.type === "add")
+                        addedLines.push(change.content);
+                }
+            }
+        }
+        const batchSymbols = (0, analysis_1.extractDeclaredSymbols)(addedLines.join("\n"));
         // Reference files get at most their budget share, and only if the diffs
         // leave meaningful room
         const references = [];
         if (repoTree && totalBudget - diffTokens > 512) {
             try {
-                references.push(...(yield findReferenceFiles(batch, specifiersOf, changedPaths, repoTree, prDetails, Math.min(Math.floor(totalBudget * REFERENCE_BUDGET_RATIO), totalBudget - diffTokens - 512), fetchCache)));
+                references.push(...(yield findReferenceFiles(batch, specifiersOf, batchSymbols, changedPaths, repoTree, prDetails, Math.min(Math.floor(totalBudget * REFERENCE_BUDGET_RATIO), totalBudget - diffTokens - 512), fetchCache)));
             }
             catch (e) {
                 console.warn("Reference discovery failed, continuing without references:", e instanceof Error ? e.message : e);
