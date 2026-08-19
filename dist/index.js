@@ -839,7 +839,11 @@ function createBatchPrompt(files, prDetails, contexts, diffTexts, references, ch
 - 以如下 JSON 格式返回结果：{"reviews": [{"file": "<文件路径>", "lineNumber": <行号>, "severity": "<critical|high|medium>", "reviewComment": "<审查意见>", "relatedFiles": ["<相关文件路径>"]}]}
   - critical：必然触发的问题——代码逻辑本身就是错的，只要执行到此处就会崩溃或产生错误结果（空指针解引用、数组越界、整数截断导致计算错误、逻辑判断反向等）
   - high：条件触发的严重问题——需要特定场景才暴露，但一旦触发影响严重（并发访问导致的竞态或数据损坏、资源泄漏积累导致耗尽、内部可变状态被外部修改导致不一致等）
-  - medium：不触发失败但增加风险的问题——当前不会出错，但让代码更脆弱或难以维护（封装不当、命名歧义、职责过重等）
+  - medium：有具体后果的风险问题——必须能明确说出它在什么场景下、如何造成实际损害；说不出具体后果就不要报
+- 报告门槛（优先级最高的规则）：
+  - 属于两种都合理的做法之间的取舍时，绝对不要报告——例如错误处理策略（截断/返回 NaN/抛错各有适用场景）、命名与语义偏好、API 设计风格、实现方式选择
+  - 判断标准：这个问题在任何合理的代码标准下都会被认定为缺陷吗？如果需要讨论才能确定对错，就不要报告
+  - 宁可少报也不报告可争议的意见；返回空数组是完全可接受、甚至值得鼓励的结果
 - relatedFiles：当问题涉及多个文件（跨文件联动问题）时，列出所有涉及文件的完整路径（file 字段所指文件也包含在内）；单文件问题返回空数组。
 - file 字段必须原样复制下方"待审查文件列表"中列出的某个路径，绝对不要编造列表之外的文件。
 - lineNumber 必须是 file 字段所指文件的新文件行号（标有"+"或空格的行），不能是被删除的行（标有"-"的行）。
@@ -965,6 +969,8 @@ ${prDetails.description}
 发现的审查问题：
 ${issuesSummary}
 
+评判标准：只有 Critical 和 High 问题构成"不建议合并"的理由；Medium 属于意见级建议，即使存在也不影响给出 ✅ 建议合并。
+
 请按以下格式给出回复（使用 GitHub Markdown）：
 
 1. 以标题开头："## 🤖 AI 代码审查 - 合并建议"
@@ -1073,10 +1079,22 @@ function resolveReviewedThreads(threads, reviewedPaths) {
         return resolved;
     });
 }
+// Comment bodies open with a severity badge (🔴/🟠/🔵); medium findings are
+// opinion-level and never block the merge verdict
+function severityOfBody(body) {
+    const head = body.slice(0, 30);
+    if (head.includes("🔴"))
+        return "critical";
+    if (head.includes("🟠"))
+        return "high";
+    return "medium";
+}
 // Compact follow-up summary that replaces the full merge suggestion on later
 // reviews, computed deterministically from thread resolution + fresh comments:
 // an old thread resolved and not re-flagged means fixed; resolved but
 // re-flagged means still open; threads on untouched files stay pending.
+// Only Critical/High findings block the merge verdict; Medium opinions are
+// listed but do not.
 function buildUpdateSummary(previousThreads, resolvedIds, comments, reviewedPaths) {
     const key = (path, line) => `${path}:${line !== null && line !== void 0 ? line : "-"}`;
     const currentKeys = new Set(comments.map((c) => key(c.path, c.line)));
@@ -1093,12 +1111,22 @@ function buildUpdateSummary(previousThreads, resolvedIds, comments, reviewedPath
         }
     }
     const fresh = comments.filter((c) => !oldKeys.has(key(c.path, c.line)));
-    const open = unfixed.length + fresh.length;
-    const conclusion = open > 0
-        ? `❌ 仍有 ${open} 个未解决问题，暂不建议合并`
-        : pending.length > 0
-            ? `✅ 已重审的问题全部修复，另有 ${pending.length} 个待确认项（对应文件未改动）`
-            : "✅ 所有问题已修复，建议合并";
+    const blockingUnfixed = unfixed.filter((t) => severityOfBody(t.snippet) !== "medium").length;
+    const blockingFresh = fresh.filter((c) => severityOfBody(c.body) !== "medium").length;
+    const blocking = blockingUnfixed + blockingFresh;
+    const opinions = unfixed.length + fresh.length - blocking;
+    let conclusion;
+    if (blocking > 0) {
+        conclusion = `❌ 仍有 ${blocking} 个阻塞问题（Critical/High），暂不建议合并`;
+    }
+    else {
+        const notes = [];
+        if (opinions > 0)
+            notes.push(`另有 ${opinions} 条 Medium 意见（不阻塞）`);
+        if (pending.length > 0)
+            notes.push(`${pending.length} 个待确认项（对应文件未改动）`);
+        conclusion = `✅ 无阻塞问题，建议合并${notes.length > 0 ? `（${notes.join("，")}）` : ""}`;
+    }
     const sections = [];
     const list = (lines) => lines.map((l) => `- ${l}`).join("\n");
     if (fixed.length > 0) {
