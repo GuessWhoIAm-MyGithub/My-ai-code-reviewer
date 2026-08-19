@@ -1231,7 +1231,10 @@ function main() {
                 const previous = existing.data
                     .filter((c) => { var _a; return (_a = c.body) === null || _a === void 0 ? void 0 : _a.includes(COMMENT_MARKER); })
                     .pop();
-                if (previous) {
+                // /review always opens a fresh summary comment (comment edits don't
+                // notify watchers, and an explicit re-scan deserves a timeline entry);
+                // regular pushes keep updating the latest one
+                if (previous && !fullRescan) {
                     yield octokit.issues.updateComment({
                         owner: prDetails.owner,
                         repo: prDetails.repo,

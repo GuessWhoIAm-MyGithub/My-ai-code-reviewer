@@ -142,7 +142,7 @@ The AI Code Reviewer GitHub Action:
 5. Skips files for which the AI finds nothing worth flagging.
 6. Posts one line-anchored review comment per finding — cross-file findings list all files they involve — and keeps a single up-to-date merge suggestion comment on the PR.
 7. On follow-up pushes, files changed in the push are re-reviewed and the action's previous review threads on those files are automatically resolved: a resolved thread that is not re-flagged means the issue was fixed, while still-present issues get fresh comments — so the PR's open threads always reflect the current state of the code.
-8. Comment `/review` on the PR at any time to force a full re-scan: every file is re-reviewed with the latest code as context and all previous threads converge to fixed/unfixed. This also closes threads whose fix landed in a different file than the one they were flagged on.
+8. Comment `/review` on the PR at any time to force a full re-scan: every file is re-reviewed with the latest code as context and all previous threads converge to fixed/unfixed. This also closes threads whose fix landed in a different file than the one they were flagged on. Each `/review` posts a fresh summary comment (visible in the timeline and notified to watchers), while regular pushes keep updating the latest summary in place.
 
 ## Contributing
 

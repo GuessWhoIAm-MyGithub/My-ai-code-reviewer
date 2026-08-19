@@ -1135,7 +1135,10 @@ async function main() {
       const previous = existing.data
         .filter((c) => c.body?.includes(COMMENT_MARKER))
         .pop();
-      if (previous) {
+      // /review always opens a fresh summary comment (comment edits don't
+      // notify watchers, and an explicit re-scan deserves a timeline entry);
+      // regular pushes keep updating the latest one
+      if (previous && !fullRescan) {
         await octokit.issues.updateComment({
           owner: prDetails.owner,
           repo: prDetails.repo,
