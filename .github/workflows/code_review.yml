@@ -12,8 +12,7 @@ jobs:
   code_review:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+      # 注意：本 action 纯 API 工作无需 checkout 仓库
 
       # --- Choose ONE of the following provider configurations ---
 
@@ -29,7 +28,7 @@ jobs:
 
       # Option 2: Anthropic Claude
       - name: AI Code Review (Anthropic)
-        uses: GuessWhoIAm-MyGithub/My-ai-code-reviewer@main
+        uses: GuessWhoIAm-MyGithub/My-ai-code-reviewer@latest
         with:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           API_KEY: ${{ secrets.API_KEY }}
@@ -37,7 +36,7 @@ jobs:
           API_MODEL: ${{ secrets.MODEL_NAME }}
           API_BASE_URL: ${{ secrets.BASE_URL }}
           MAX_TOKENS: "131072"
-          exclude: "yarn.lock,dist/**"
+          exclude: "*.lock,dist/**"
 
       # Option 3: Google Gemini
       # - name: AI Code Review (Gemini)
