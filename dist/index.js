@@ -407,9 +407,10 @@ const API_MODEL = core.getInput("API_MODEL") || core.getInput("OPENAI_API_MODEL"
 const API_PROVIDER = core.getInput("API_PROVIDER") || "openai";
 const API_BASE_URL = core.getInput("API_BASE_URL") || "";
 // Response (output) token cap. Sized generously for multi-file batch reviews
-// where a single JSON response covers every file in the batch; models with a
-// 512K context window accept up to 512K output tokens.
-const MAX_TOKENS = parseInt(core.getInput("MAX_TOKENS") || "524288", 10);
+// where a single JSON response covers every file in the batch. 131072 is the
+// largest value Anthropic-compatible endpoints accept (input 256K + output
+// 128K still fits a 512K context window).
+const MAX_TOKENS = parseInt(core.getInput("MAX_TOKENS") || "131072", 10);
 // Approximate token budget (prompt instructions + diffs + file context +
 // reference files) per review batch. Defaults sized for a 256K-input model so
 // a typical PR is reviewed in a single cross-file call.

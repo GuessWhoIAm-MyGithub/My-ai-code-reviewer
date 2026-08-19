@@ -125,7 +125,7 @@ You can point OpenAI or Anthropic to a custom endpoint (e.g., Azure OpenAI, loca
 | `API_PROVIDER`          | No       | `"openai"` | AI provider: `openai`, `anthropic`, or `gemini`                                    |
 | `API_MODEL`             | No       | `"gpt-4"`  | Model name (e.g., `gpt-4`, `claude-sonnet-4-20250514`, `gemini-pro`)               |
 | `API_BASE_URL`          | No       | `""`       | Custom API base URL (overrides provider default)                                   |
-| `MAX_TOKENS`            | No       | `524288`   | Maximum number of tokens for the AI model response                                        |
+| `MAX_TOKENS`            | No       | `131072`   | Maximum number of tokens for the AI model response                                        |
 | `CONTEXT_WINDOW_TOKENS` | No       | `262144`   | Approximate token budget per review batch (instructions + diffs + context + references)   |
 | `exclude`               | No       | `""`       | Glob patterns to exclude files, comma-separated                                           |
 

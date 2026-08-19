@@ -23,7 +23,7 @@ inputs:
   MAX_TOKENS:
     description: "Maximum number of tokens for the AI model response."
     required: false
-    default: "524288"
+    default: "131072"
   CONTEXT_WINDOW_TOKENS:
     description: "Approximate token budget per review batch (prompt instructions + diffs + file context + reference files) sent to the AI model."
     required: false
