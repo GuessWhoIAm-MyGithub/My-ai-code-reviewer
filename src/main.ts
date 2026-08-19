@@ -10,6 +10,7 @@ import {
   resolveImportSpecifier,
   extractDeclaredSymbols,
   referencesAnySymbol,
+  correctRelatedPaths,
   formatFileDiff,
   getNewFileLineNumber,
   buildReviewGroups,
@@ -524,6 +525,17 @@ async function reviewBatch(
 
   // Map findings back to batch files: exact path → path suffix → unique
   // basename → drop (guards against the model inventing file paths)
+  // Everything the model could legitimately name in relatedFiles: the files
+  // it saw diffs for, the PR's changed files from the overview, and reference
+  // files. Claims outside this set get corrected or dropped.
+  const knownPaths = [
+    ...batch.map((f) => f.to!),
+    ...allFiles
+      .filter((f) => f.to && f.to !== "/dev/null")
+      .map((f) => f.to!),
+    ...references.map((r) => r.path),
+  ];
+
   const byFile = new Map<string, AIReviewFinding[]>();
   for (const finding of aiResponse) {
     const claimed =
@@ -549,7 +561,13 @@ async function reviewBatch(
       continue;
     }
     const arr = byFile.get(target.to!) ?? [];
-    arr.push(finding);
+    arr.push({
+      ...finding,
+      relatedFiles: correctRelatedPaths(
+        finding.relatedFiles ?? [],
+        knownPaths
+      ),
+    });
     byFile.set(target.to!, arr);
   }
 

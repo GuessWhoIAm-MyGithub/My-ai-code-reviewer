@@ -241,6 +241,45 @@ export function referencesAnySymbol(
   return new RegExp(`\\b(?:${symbols.join("|")})\\b`).test(content);
 }
 
+// Correct model-claimed "related file" paths against the paths the model
+// actually saw (batch files, PR changed files, reference files): exact match
+// first, then path-suffix, then basename with the closest directory. Claims
+// that match nothing the model could have seen are dropped — the anchor file
+// is validated separately and relatedFiles is informational.
+export function correctRelatedPaths(
+  claimed: string[],
+  knownPaths: string[]
+): string[] {
+  const known = new Set(knownPaths);
+  const corrected: string[] = [];
+  for (const raw of claimed) {
+    const path = raw.trim();
+    if (!path) continue;
+    let match: string | undefined;
+    if (known.has(path)) {
+      match = path;
+    } else {
+      const bySuffix = [...known].filter((k) => k.endsWith("/" + path));
+      if (bySuffix.length > 0) {
+        match = bySuffix.sort((a, b) => a.length - b.length)[0];
+      } else {
+        const base = path.split("/").pop()!;
+        const byBase = knownPaths.filter(
+          (k) => k.split("/").pop() === base
+        );
+        if (byBase.length > 0) {
+          // closest directory wins; ties break alphabetically for determinism
+          match = byBase
+            .map((k) => ({ k, depth: sharedDirDepth(k, path) }))
+            .sort((a, b) => b.depth - a.depth || a.k.localeCompare(b.k))[0].k;
+        }
+      }
+    }
+    if (match && !corrected.includes(match)) corrected.push(match);
+  }
+  return corrected;
+}
+
 // --- Diff rendering ----------------------------------------------------------
 
 export function getNewFileLineNumber(change: Change): number | null {

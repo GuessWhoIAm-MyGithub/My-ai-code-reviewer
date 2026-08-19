@@ -7,7 +7,7 @@ require('./sourcemap-register.js');/******/ (() => { // webpackBootstrap
 "use strict";
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.summarizeChangedFiles = exports.selectCallerCandidates = exports.buildReviewGroups = exports.formatFileDiff = exports.getNewFileLineNumber = exports.referencesAnySymbol = exports.extractDeclaredSymbols = exports.resolveImportSpecifier = exports.extractImportSpecifiers = exports.languageOf = exports.estimateTokens = exports.MAX_REFERENCES_PER_BATCH = exports.MAX_REFERENCE_CANDIDATES = void 0;
+exports.summarizeChangedFiles = exports.selectCallerCandidates = exports.buildReviewGroups = exports.formatFileDiff = exports.getNewFileLineNumber = exports.correctRelatedPaths = exports.referencesAnySymbol = exports.extractDeclaredSymbols = exports.resolveImportSpecifier = exports.extractImportSpecifiers = exports.languageOf = exports.estimateTokens = exports.MAX_REFERENCES_PER_BATCH = exports.MAX_REFERENCE_CANDIDATES = void 0;
 // Pure cross-file analysis helpers: import heuristics, diff rendering, and
 // review-batch grouping. No IO here so everything is directly testable.
 // Repo files scanned for reverse references (callers) per batch
@@ -252,6 +252,44 @@ function referencesAnySymbol(content, symbols) {
     return new RegExp(`\\b(?:${symbols.join("|")})\\b`).test(content);
 }
 exports.referencesAnySymbol = referencesAnySymbol;
+// Correct model-claimed "related file" paths against the paths the model
+// actually saw (batch files, PR changed files, reference files): exact match
+// first, then path-suffix, then basename with the closest directory. Claims
+// that match nothing the model could have seen are dropped — the anchor file
+// is validated separately and relatedFiles is informational.
+function correctRelatedPaths(claimed, knownPaths) {
+    const known = new Set(knownPaths);
+    const corrected = [];
+    for (const raw of claimed) {
+        const path = raw.trim();
+        if (!path)
+            continue;
+        let match;
+        if (known.has(path)) {
+            match = path;
+        }
+        else {
+            const bySuffix = [...known].filter((k) => k.endsWith("/" + path));
+            if (bySuffix.length > 0) {
+                match = bySuffix.sort((a, b) => a.length - b.length)[0];
+            }
+            else {
+                const base = path.split("/").pop();
+                const byBase = knownPaths.filter((k) => k.split("/").pop() === base);
+                if (byBase.length > 0) {
+                    // closest directory wins; ties break alphabetically for determinism
+                    match = byBase
+                        .map((k) => ({ k, depth: sharedDirDepth(k, path) }))
+                        .sort((a, b) => b.depth - a.depth || a.k.localeCompare(b.k))[0].k;
+                }
+            }
+        }
+        if (match && !corrected.includes(match))
+            corrected.push(match);
+    }
+    return corrected;
+}
+exports.correctRelatedPaths = correctRelatedPaths;
 // --- Diff rendering ----------------------------------------------------------
 function getNewFileLineNumber(change) {
     switch (change.type) {
@@ -760,7 +798,7 @@ function findReferenceFiles(batch, specifiersOf, batchSymbols, changedPaths, rep
 // Review one batch of related files in a single AI call and map the findings
 // back onto individual files.
 function reviewBatch(batch, allFiles, contents, specifiersOf, repoTree, changedPaths, prDetails, fetchCache) {
-    var _a, _b, _c, _d;
+    var _a, _b, _c, _d, _e;
     return __awaiter(this, void 0, void 0, function* () {
         const diffTexts = new Map();
         let diffTokens = 0;
@@ -810,6 +848,16 @@ function reviewBatch(batch, allFiles, contents, specifiersOf, repoTree, changedP
             return [];
         // Map findings back to batch files: exact path → path suffix → unique
         // basename → drop (guards against the model inventing file paths)
+        // Everything the model could legitimately name in relatedFiles: the files
+        // it saw diffs for, the PR's changed files from the overview, and reference
+        // files. Claims outside this set get corrected or dropped.
+        const knownPaths = [
+            ...batch.map((f) => f.to),
+            ...allFiles
+                .filter((f) => f.to && f.to !== "/dev/null")
+                .map((f) => f.to),
+            ...references.map((r) => r.path),
+        ];
         const byFile = new Map();
         for (const finding of aiResponse) {
             const claimed = typeof finding.file === "string" ? finding.file.trim() : "";
@@ -833,12 +881,12 @@ function reviewBatch(batch, allFiles, contents, specifiersOf, repoTree, changedP
                 continue;
             }
             const arr = (_c = byFile.get(target.to)) !== null && _c !== void 0 ? _c : [];
-            arr.push(finding);
+            arr.push(Object.assign(Object.assign({}, finding), { relatedFiles: (0, analysis_1.correctRelatedPaths)((_d = finding.relatedFiles) !== null && _d !== void 0 ? _d : [], knownPaths) }));
             byFile.set(target.to, arr);
         }
         const comments = [];
         for (const file of batch) {
-            comments.push(...createFindingComments(file, (_d = byFile.get(file.to)) !== null && _d !== void 0 ? _d : []));
+            comments.push(...createFindingComments(file, (_e = byFile.get(file.to)) !== null && _e !== void 0 ? _e : []));
         }
         return comments;
     });
