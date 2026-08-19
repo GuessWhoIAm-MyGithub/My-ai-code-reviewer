@@ -25,9 +25,8 @@ jobs:
       #     exclude: "yarn.lock,dist/**"
 
       # Option 2: Anthropic Claude
-      # 注意：指向 feature 分支以 dogfood 测试跨文件批量审查，合并后改回 @main
       - name: AI Code Review (Anthropic)
-        uses: GuessWhoIAm-MyGithub/My-ai-code-reviewer@feat/cross-file-batch-review
+        uses: GuessWhoIAm-MyGithub/My-ai-code-reviewer@main
         with:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           API_KEY: ${{ secrets.API_KEY }}
