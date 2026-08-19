@@ -74,6 +74,9 @@ jobs:
           gh release create "$tag" --target "$GITHUB_SHA" --generate-notes --title "$tag"
           major_version="${tag#v}"
           major_tag="v${major_version%%.*}"
+          # 维护两个浮动 tag：主版本号（v1）供使用方固定大版本，
+          # latest 供想始终跟随最新 release 的使用方引用
           git tag -f "$major_tag" "$GITHUB_SHA"
-          git push -f origin "$major_tag"
+          git tag -f latest "$GITHUB_SHA"
+          git push -f origin "$major_tag" latest
           echo "Released $tag and updated $major_tag"
