@@ -750,6 +750,7 @@ ${prDetails.description}
 ${issuesSummary}
 
 评判标准：只有 Critical 和 High 问题构成"不建议合并"的理由；Medium 属于意见级建议，即使存在也不影响给出 ✅ 建议合并。
+注意：PR 标题和描述可能已过时（例如其中提到的问题已在后续提交中修复），请以上方的实际审查结果为准下结论，不要仅凭描述内容判断。
 
 请按以下格式给出回复（使用 GitHub Markdown）：
 
