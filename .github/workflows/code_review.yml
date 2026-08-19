@@ -15,24 +15,26 @@ jobs:
       # --- Choose ONE of the following provider configurations ---
 
       # Option 1: OpenAI
-      - name: AI Code Review (OpenAI)
-        uses: GuessWhoIAm-MyGithub/My-ai-code-reviewer@main
-        with:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          API_PROVIDER: "openai"
-          API_MODEL: "gpt-4"
-          exclude: "yarn.lock,dist/**"
-
-      # Option 2: Anthropic Claude
-      # - name: AI Code Review (Anthropic)
+      # - name: AI Code Review (OpenAI)
       #   uses: GuessWhoIAm-MyGithub/My-ai-code-reviewer@main
       #   with:
       #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      #     API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      #     API_PROVIDER: "anthropic"
-      #     API_MODEL: "claude-sonnet-4-20250514"
+      #     API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      #     API_PROVIDER: "openai"
+      #     API_MODEL: "gpt-4"
       #     exclude: "yarn.lock,dist/**"
+
+      # Option 2: Anthropic Claude
+      # 注意：指向 feature 分支以 dogfood 测试跨文件批量审查，合并后改回 @main
+      - name: AI Code Review (Anthropic)
+        uses: GuessWhoIAm-MyGithub/My-ai-code-reviewer@feat/cross-file-batch-review
+        with:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          API_KEY: ${{ secrets.API_KEY }}
+          API_PROVIDER: "anthropic"
+          API_MODEL: ${{ secrets.MODEL_NAME }}
+          API_BASE_URL: ${{ secrets.BASE_URL }}
+          exclude: "yarn.lock,dist/**"
 
       # Option 3: Google Gemini
       # - name: AI Code Review (Gemini)

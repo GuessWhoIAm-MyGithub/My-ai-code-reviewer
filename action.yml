@@ -25,9 +25,9 @@ inputs:
     required: false
     default: "16384"
   CONTEXT_WINDOW_TOKENS:
-    description: "Approximate token budget per file (prompt + diff + file context) sent to the AI model."
+    description: "Approximate token budget per review batch (prompt instructions + diffs + file context + reference files) sent to the AI model."
     required: false
-    default: "20480"
+    default: "262144"
   exclude:
     description: "Glob patterns to exclude files from the diff analysis"
     required: false

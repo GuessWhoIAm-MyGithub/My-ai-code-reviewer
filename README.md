@@ -5,6 +5,7 @@ AI Code Reviewer is a GitHub Action that leverages AI to provide intelligent fee
 ## Features
 
 - Reviews pull requests using OpenAI, Anthropic, or Google Gemini APIs.
+- Cross-file review: files linked by imports are reviewed together in a single request, with unchanged callers/dependencies included as reference context, to catch inconsistent linked changes.
 - Configurable AI provider, model, and base URL via workflow inputs.
 - Provides intelligent comments and suggestions for improving your code.
 - Filters out files that match specified exclude patterns.
@@ -124,9 +125,9 @@ You can point OpenAI or Anthropic to a custom endpoint (e.g., Azure OpenAI, loca
 | `API_PROVIDER`          | No       | `"openai"` | AI provider: `openai`, `anthropic`, or `gemini`                                    |
 | `API_MODEL`             | No       | `"gpt-4"`  | Model name (e.g., `gpt-4`, `claude-sonnet-4-20250514`, `gemini-pro`)               |
 | `API_BASE_URL`          | No       | `""`       | Custom API base URL (overrides provider default)                                   |
-| `MAX_TOKENS`            | No       | `16384`    | Maximum number of tokens for the AI model response                                 |
-| `CONTEXT_WINDOW_TOKENS` | No       | `20480`    | Approximate token budget per file (prompt + diff + file context) sent to the model |
-| `exclude`               | No       | `""`       | Glob patterns to exclude files, comma-separated                                    |
+| `MAX_TOKENS`            | No       | `16384`    | Maximum number of tokens for the AI model response                                        |
+| `CONTEXT_WINDOW_TOKENS` | No       | `262144`   | Approximate token budget per review batch (instructions + diffs + context + references)   |
+| `exclude`               | No       | `""`       | Glob patterns to exclude files, comma-separated                                           |
 
 \*You can also use the deprecated `OPENAI_API_KEY` and `OPENAI_API_MODEL` inputs for backward compatibility.
 
@@ -136,9 +137,10 @@ The AI Code Reviewer GitHub Action:
 
 1. Retrieves the pull request diff when a PR is opened or updated.
 2. Filters out files matching the exclude patterns.
-3. Sends each file's full diff (plus surrounding file context, both fitted into the `CONTEXT_WINDOW_TOKENS` budget) to the configured AI provider in a single request.
-4. Skips files for which the AI finds nothing worth flagging.
-5. Posts one file-level review comment per file with findings (falling back to a line-anchored comment if the GitHub API rejects file-level comments), plus a top-level merge suggestion on the PR.
+3. Groups the changed files into review batches: files linked by import relationships (or sharing a directory) are reviewed together in a single AI request, so cross-file consistency issues (a changed function signature vs. its callers, renamed constants/types, module contracts) can be detected. With the default 256K budget a typical PR is reviewed in one single request; oversized PRs are split, evicting the least-connected files first.
+4. Additionally fetches a small number of unchanged related files (callers of the changed code and modules it depends on) and includes them as read-only reference context, which surfaces breaking changes like "the interface changed but this usage was not updated".
+5. Skips files for which the AI finds nothing worth flagging.
+6. Posts one file-level review comment per file with findings (falling back to a line-anchored comment if the GitHub API rejects file-level comments), plus a top-level merge suggestion on the PR.
 
 ## Contributing
 
