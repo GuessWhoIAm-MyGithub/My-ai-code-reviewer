@@ -2,7 +2,10 @@
 export function parseIntSafe(raw: string): number {
   try {
     const parsed: unknown = JSON.parse(raw);
-    return typeof parsed === "number" && Number.isFinite(parsed) ? parsed : NaN;
+    if (typeof parsed !== "number" || !Number.isFinite(parsed)) {
+      return NaN;
+    }
+    return Math.trunc(parsed);
   } catch {
     return NaN;
   }
