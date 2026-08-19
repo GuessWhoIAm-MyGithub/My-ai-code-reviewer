@@ -1,6 +1,358 @@
 require('./sourcemap-register.js');/******/ (() => { // webpackBootstrap
 /******/ 	var __webpack_modules__ = ({
 
+/***/ 4029:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.summarizeChangedFiles = exports.selectCallerCandidates = exports.buildReviewGroups = exports.formatFileDiff = exports.getNewFileLineNumber = exports.resolveImportSpecifier = exports.extractImportSpecifiers = exports.languageOf = exports.estimateTokens = exports.MAX_REFERENCES_PER_BATCH = exports.MAX_REFERENCE_CANDIDATES = void 0;
+// Pure cross-file analysis helpers: import heuristics, diff rendering, and
+// review-batch grouping. No IO here so everything is directly testable.
+// Repo files scanned for reverse references (callers) per batch
+exports.MAX_REFERENCE_CANDIDATES = 30;
+// Unchanged related files actually included per batch
+exports.MAX_REFERENCES_PER_BATCH = 6;
+// Rough heuristic for code/diff content: ~4 characters per token
+function estimateTokens(text) {
+    return Math.ceil(text.length / 4);
+}
+exports.estimateTokens = estimateTokens;
+// --- Import extraction -------------------------------------------------------
+const JS_IMPORT_RES = [
+    /import\s[^;'"()]*?from\s*['"]([^'"]+)['"]/g,
+    /export\s[^;'"()]*?from\s*['"]([^'"]+)['"]/g,
+    /require\(\s*['"]([^'"]+)['"]\s*\)/g,
+    /import\(\s*['"]([^'"]+)['"]\s*\)/g,
+];
+const PY_IMPORT_RES = [
+    /^\s*from\s+([.\w]+)\s+import\s+/gm,
+    /^\s*import\s+([.\w]+)/gm,
+];
+const JVM_IMPORT_RES = [/^\s*import\s+(?:static\s+)?([\w.]+)\s*;/gm];
+function languageOf(path) {
+    const ext = path.slice(path.lastIndexOf(".") + 1).toLowerCase();
+    if (["ts", "tsx", "js", "jsx", "mjs", "cjs", "vue", "svelte"].includes(ext))
+        return "js";
+    if (ext === "py")
+        return "python";
+    if (ext === "go")
+        return "go";
+    if (["java", "kt", "kts"].includes(ext))
+        return "jvm";
+    return "unknown";
+}
+exports.languageOf = languageOf;
+function extractImportSpecifiers(filePath, content) {
+    const lang = languageOf(filePath);
+    const specs = [];
+    const collect = (re) => {
+        for (const m of content.matchAll(re))
+            if (m[1])
+                specs.push(m[1]);
+    };
+    if (lang === "js") {
+        JS_IMPORT_RES.forEach(collect);
+    }
+    else if (lang === "python") {
+        PY_IMPORT_RES.forEach(collect);
+    }
+    else if (lang === "go") {
+        // Only strings inside import blocks count, so arbitrary string literals
+        // are not mistaken for imports
+        for (const block of content.matchAll(/import\s*\(([\s\S]*?)\)/g)) {
+            for (const q of block[1].matchAll(/"([^"]+)"/g))
+                specs.push(q[1]);
+        }
+        collect(/(?:^|\n)import\s+"([^"]+)"/g);
+    }
+    else if (lang === "jvm") {
+        JVM_IMPORT_RES.forEach(collect);
+    }
+    return [...new Set(specs)];
+}
+exports.extractImportSpecifiers = extractImportSpecifiers;
+function normalizeRepoPath(p) {
+    const out = [];
+    for (const part of p.split("/")) {
+        if (part === "" || part === ".")
+            continue;
+        if (part === "..")
+            out.pop();
+        else
+            out.push(part);
+    }
+    return out.join("/");
+}
+// Resolve an import specifier against a set of known repo paths. Returns the
+// matched path, or null for bare package imports (node_modules, stdlib, ...).
+function resolveImportSpecifier(fromPath, spec, candidatePaths) {
+    const lang = languageOf(fromPath);
+    if (lang === "go" || lang === "jvm") {
+        // Module-path style imports: match by path suffix (package dir for Go,
+        // dotted class path for Java/Kotlin)
+        const dotted = spec.replace(/\./g, "/").replace(/\/\*$/, "");
+        for (const p of candidatePaths) {
+            const noExt = p.replace(/\.[^.]+$/, "");
+            if (lang === "jvm") {
+                if (noExt === dotted || noExt.endsWith("/" + dotted))
+                    return p;
+            }
+            else {
+                const dir = p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "";
+                if (dir && (dotted === dir || dotted.endsWith("/" + dir)))
+                    return p;
+            }
+        }
+        return null;
+    }
+    if (lang === "python" && spec.startsWith(".")) {
+        // Python relative import: the first dot means the containing package,
+        // each additional dot goes up one level ("..sib.mod" → ../sib/mod.py)
+        const dots = spec.match(/^[.]*/)[0].length;
+        const rest = spec.slice(dots).replace(/\./g, "/");
+        let base = fromPath.includes("/")
+            ? fromPath.slice(0, fromPath.lastIndexOf("/"))
+            : "";
+        for (let u = 1; u < dots; u++) {
+            base = base.includes("/") ? base.slice(0, base.lastIndexOf("/")) : "";
+        }
+        const joined = normalizeRepoPath(base + "/" + rest);
+        for (const tail of ["", ".py", "/__init__.py"]) {
+            if (candidatePaths.has(joined + tail))
+                return joined + tail;
+        }
+        return null;
+    }
+    if (spec.startsWith(".")) {
+        // Relative specifier (JS/TS)
+        const base = fromPath.includes("/")
+            ? fromPath.slice(0, fromPath.lastIndexOf("/"))
+            : "";
+        const joined = normalizeRepoPath(`${base}/${spec}`);
+        for (const tail of [
+            "",
+            ".ts",
+            ".tsx",
+            ".js",
+            ".jsx",
+            ".mjs",
+            ".cjs",
+            ".py",
+            "/index.ts",
+            "/index.tsx",
+            "/index.js",
+            "/index.jsx",
+            "/__init__.py",
+        ]) {
+            if (candidatePaths.has(joined + tail))
+                return joined + tail;
+        }
+        return null;
+    }
+    if (lang === "python") {
+        // Absolute module path: resolve against the repo root and the importer's
+        // own directory (implicit namespace packages)
+        const mod = spec.replace(/\./g, "/");
+        const bases = [
+            "",
+            fromPath.includes("/")
+                ? fromPath.slice(0, fromPath.lastIndexOf("/")) + "/"
+                : "",
+        ];
+        for (const base of bases) {
+            for (const tail of [".py", "/__init__.py"]) {
+                const p = normalizeRepoPath(base + mod + tail);
+                if (candidatePaths.has(p))
+                    return p;
+            }
+        }
+    }
+    return null;
+}
+exports.resolveImportSpecifier = resolveImportSpecifier;
+// --- Diff rendering ----------------------------------------------------------
+function getNewFileLineNumber(change) {
+    switch (change.type) {
+        case "add":
+            return change.ln;
+        case "normal":
+            return change.ln2;
+        case "del":
+            return null; // deleted lines don't exist in the new file
+    }
+}
+exports.getNewFileLineNumber = getNewFileLineNumber;
+function formatChange(change) {
+    const newLine = getNewFileLineNumber(change);
+    const lineLabel = newLine != null ? String(newLine) : "-";
+    const prefix = change.type === "add" ? "+" : change.type === "del" ? "-" : " ";
+    // change.content already has +/- prefix from parse-diff, strip it for clean formatting
+    const content = change.content.startsWith("+") || change.content.startsWith("-")
+        ? change.content.slice(1)
+        : change.content;
+    return `${lineLabel} ${prefix} ${content}`;
+}
+function formatFileDiff(file) {
+    return file.chunks
+        .map((chunk) => {
+        const header = chunk.content;
+        const lines = chunk.changes.map(formatChange).join("\n");
+        return `${header}\n${lines}`;
+    })
+        .join("\n\n");
+}
+exports.formatFileDiff = formatFileDiff;
+// --- Review batching ---------------------------------------------------------
+// Group changed files into review batches: files linked by imports belong to
+// the same call so the model can check cross-file consistency. Oversized
+// groups are split, evicting the least-connected files first.
+function buildReviewGroups(files, importsOf, budget) {
+    var _a;
+    const diffTokensOf = (f) => estimateTokens(formatFileDiff(f));
+    const groupTokens = (g) => g.reduce((s, f) => s + diffTokensOf(f), 0);
+    // Union-find over import edges between changed files
+    const parent = new Map();
+    const find = (x) => {
+        let root = x;
+        while (parent.get(root) !== root)
+            root = parent.get(root);
+        while (parent.get(x) !== root) {
+            const next = parent.get(x);
+            parent.set(x, root);
+            x = next;
+        }
+        return root;
+    };
+    const union = (a, b) => {
+        const ra = find(a);
+        const rb = find(b);
+        if (ra !== rb)
+            parent.set(ra, rb);
+    };
+    for (const f of files)
+        parent.set(f.to, f.to);
+    for (const [path, deps] of importsOf) {
+        for (const dep of deps) {
+            if (parent.has(dep))
+                union(path, dep);
+        }
+    }
+    const components = new Map();
+    for (const f of files) {
+        const root = find(f.to);
+        const arr = (_a = components.get(root)) !== null && _a !== void 0 ? _a : [];
+        arr.push(f);
+        components.set(root, arr);
+    }
+    // Merge components: same directory first (most likely related), then any
+    // remaining groups while the combined diffs still fit the budget
+    const dirOf = (p) => p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "";
+    const groups = [...components.values()].sort((a, b) => dirOf(a[0].to).localeCompare(dirOf(b[0].to)) ||
+        groupTokens(b) - groupTokens(a));
+    const merged = [];
+    for (const g of groups) {
+        const target = merged.find((m) => groupTokens(m) + groupTokens(g) <= budget &&
+            dirOf(m[0].to) === dirOf(g[0].to));
+        if (target)
+            target.push(...g);
+        else
+            merged.push([...g]);
+    }
+    for (let i = 0; i < merged.length; i++) {
+        for (let j = merged.length - 1; j > i; j--) {
+            if (groupTokens(merged[i]) + groupTokens(merged[j]) <= budget) {
+                merged[i].push(...merged[j]);
+                merged.splice(j, 1);
+            }
+        }
+    }
+    // Split any group still over budget: repeatedly evict the file with the
+    // fewest import links to the rest (largest diff breaks ties), keeping the
+    // tightly-coupled core together. Evicted files form a spill group that is
+    // itself split recursively.
+    const result = [];
+    const intraLinks = (f, g) => {
+        var _a;
+        const deps = (_a = importsOf.get(f.to)) !== null && _a !== void 0 ? _a : new Set();
+        const outgoing = [...deps].filter((d) => g.some((o) => o.to === d)).length;
+        const incoming = g.filter((o) => { var _a; return ((_a = importsOf.get(o.to)) !== null && _a !== void 0 ? _a : new Set()).has(f.to); }).length;
+        return outgoing + incoming;
+    };
+    const pickVictim = (g) => g.reduce((worst, f) => {
+        const score = (c) => intraLinks(c, g) * 1e9 - diffTokensOf(c);
+        return score(f) < score(worst) ? f : worst;
+    }, g[0]);
+    const splitGroup = (g) => {
+        if (g.length === 1 || groupTokens(g) <= budget)
+            return [g];
+        const spill = [];
+        let current = [...g];
+        while (current.length > 1 && groupTokens(current) > budget) {
+            const victim = pickVictim(current);
+            current = current.filter((f) => f !== victim);
+            spill.push(victim);
+        }
+        return [...splitGroup(current), ...(spill.length ? splitGroup(spill) : [])];
+    };
+    for (const g of merged)
+        result.push(...splitGroup(g));
+    return result;
+}
+exports.buildReviewGroups = buildReviewGroups;
+function sharedDirDepth(a, b) {
+    const sa = a.split("/").slice(0, -1);
+    const sb = b.split("/").slice(0, -1);
+    let i = 0;
+    while (i < sa.length && i < sb.length && sa[i] === sb[i])
+        i++;
+    return i;
+}
+// Nearby same-language repo files that may import the batch files, nearest by
+// shared directory first; capped to bound the number of getContent calls.
+function selectCallerCandidates(batchPaths, repoTree, changedPaths) {
+    const batchLanguages = new Set(batchPaths.map(languageOf).filter((l) => l !== "unknown"));
+    const scored = [];
+    for (const path of repoTree) {
+        if (changedPaths.has(path))
+            continue;
+        const lang = languageOf(path);
+        if (lang === "unknown" || !batchLanguages.has(lang))
+            continue;
+        const depth = Math.max(...batchPaths.map((b) => sharedDirDepth(path, b)));
+        if (depth >= 1)
+            scored.push({ path, depth });
+    }
+    scored.sort((a, b) => b.depth - a.depth || a.path.localeCompare(b.path));
+    return scored.slice(0, exports.MAX_REFERENCE_CANDIDATES).map((s) => s.path);
+}
+exports.selectCallerCandidates = selectCallerCandidates;
+// One line per changed file (+adds/-dels), shown in every batch prompt so the
+// model knows the full scope of the PR even when it spans several batches.
+function summarizeChangedFiles(files) {
+    return files
+        .map((f) => {
+        let add = 0;
+        let del = 0;
+        for (const chunk of f.chunks) {
+            for (const change of chunk.changes) {
+                if (change.type === "add")
+                    add++;
+                else if (change.type === "del")
+                    del++;
+            }
+        }
+        const path = f.to && f.to !== "/dev/null" ? f.to : `${f.from} (deleted)`;
+        return `- ${path} (+${add}/-${del})`;
+    })
+        .join("\n");
+}
+exports.summarizeChangedFiles = summarizeChangedFiles;
+
+
+/***/ }),
+
 /***/ 3109:
 /***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
@@ -48,14 +400,17 @@ const rest_1 = __nccwpck_require__(5375);
 const parse_diff_1 = __importDefault(__nccwpck_require__(4833));
 const minimatch_1 = __importDefault(__nccwpck_require__(2002));
 const providers_1 = __nccwpck_require__(6371);
+const analysis_1 = __nccwpck_require__(4029);
 const GITHUB_TOKEN = core.getInput("GITHUB_TOKEN");
 const API_KEY = core.getInput("API_KEY") || core.getInput("OPENAI_API_KEY");
 const API_MODEL = core.getInput("API_MODEL") || core.getInput("OPENAI_API_MODEL") || "gpt-4";
 const API_PROVIDER = core.getInput("API_PROVIDER") || "openai";
 const API_BASE_URL = core.getInput("API_BASE_URL") || "";
 const MAX_TOKENS = parseInt(core.getInput("MAX_TOKENS") || "16384", 10);
-// Approximate token budget (prompt instructions + diff + file context) per reviewed file
-const CONTEXT_WINDOW_TOKENS = parseInt(core.getInput("CONTEXT_WINDOW_TOKENS") || "20480", 10);
+// Approximate token budget (prompt instructions + diffs + file context +
+// reference files) per review batch. Defaults sized for a 256K-input model so
+// a typical PR is reviewed in a single cross-file call.
+const CONTEXT_WINDOW_TOKENS = parseInt(core.getInput("CONTEXT_WINDOW_TOKENS") || "262144", 10);
 if (!API_KEY) {
     core.setFailed("API_KEY (or OPENAI_API_KEY) is required.");
     process.exit(1);
@@ -101,12 +456,35 @@ function getFileContent(owner, repo, path, ref) {
         }
     });
 }
-// Rough heuristic for code/diff content: ~4 characters per token
-function estimateTokens(text) {
-    return Math.ceil(text.length / 4);
+function getRepoTree(owner, repo, ref) {
+    return __awaiter(this, void 0, void 0, function* () {
+        try {
+            const response = yield octokit.git.getTree({
+                owner,
+                repo,
+                tree_sha: ref,
+                recursive: "true",
+            });
+            return response.data.tree
+                .filter((entry) => entry.type === "blob" && entry.path)
+                .map((entry) => entry.path);
+        }
+        catch (e) {
+            console.warn("Could not fetch repository tree, reference discovery disabled:", e instanceof Error ? e.message : e);
+            return null;
+        }
+    });
 }
 const PROMPT_OVERHEAD_TOKENS = 2000; // prompt instructions + PR title/description
 const CONTEXT_LINES = 20; // unchanged lines of surrounding code kept around each hunk
+// estimateTokens() assumes ~4 chars/token, which underestimates CJK-heavy
+// content; keep 10% headroom so batched prompts stay inside the model input limit
+const TOKEN_ESTIMATE_SAFETY = 0.9;
+// Share of the batch token budget usable for unchanged related reference files
+const REFERENCE_BUDGET_RATIO = 0.25;
+function batchTokenBudget() {
+    return Math.floor((CONTEXT_WINDOW_TOKENS - PROMPT_OVERHEAD_TOKENS) * TOKEN_ESTIMATE_SAFETY);
+}
 function extractContextWindow(fileLines, chunks, tokenBudget) {
     const maxChars = tokenBudget * 4;
     // 收集每个 chunk 变更区域的行范围（1-based）
@@ -170,78 +548,236 @@ function getChangedFilesBetweenCommits(owner, repo, baseSha, headSha) {
 function analyzeCode(parsedDiff, prDetails) {
     return __awaiter(this, void 0, void 0, function* () {
         const comments = [];
-        for (const file of parsedDiff) {
-            if (file.to === "/dev/null")
-                continue; // Ignore deleted files
-            if (file.chunks.length === 0)
-                continue;
-            // Fit diff + surrounding file context into the context-window token budget
-            const diffText = formatFileDiff(file);
-            const contextBudget = CONTEXT_WINDOW_TOKENS - PROMPT_OVERHEAD_TOKENS - estimateTokens(diffText);
-            // Skip fetching the file when there is no meaningful room left for context
-            const fileLines = contextBudget > 512
-                ? yield getFileContent(prDetails.owner, prDetails.repo, file.to, prDetails.headSha)
-                : null;
-            const fileContext = fileLines
-                ? extractContextWindow(fileLines, file.chunks, contextBudget)
-                : null;
-            const prompt = createFilePrompt(file, prDetails, fileContext, diffText);
-            const aiResponse = yield getAIResponse(prompt);
-            // Files without findings simply produce no comment
-            comments.push(...createFileComment(file, aiResponse !== null && aiResponse !== void 0 ? aiResponse : []));
+        const reviewable = parsedDiff.filter((file) => file.to && file.to !== "/dev/null" && file.chunks.length > 0);
+        if (reviewable.length === 0)
+            return comments;
+        // Fetch full contents once per changed file: needed both for import
+        // analysis and for per-file diff context
+        const contents = new Map();
+        yield Promise.all(reviewable.map((file) => __awaiter(this, void 0, void 0, function* () {
+            contents.set(file.to, yield getFileContent(prDetails.owner, prDetails.repo, file.to, prDetails.headSha));
+        })));
+        // Resolve import edges between changed files; fall back to added diff lines
+        // when the file content is unavailable
+        const changedPaths = new Set(reviewable.map((f) => f.to));
+        const importsOf = new Map();
+        const specifiersOf = new Map();
+        for (const file of reviewable) {
+            const lines = contents.get(file.to);
+            const text = lines
+                ? lines.join("\n")
+                : file.chunks
+                    .flatMap((chunk) => chunk.changes)
+                    .filter((change) => change.type !== "del")
+                    .map((change) => change.content.replace(/^[+-]/, ""))
+                    .join("\n");
+            const specs = (0, analysis_1.extractImportSpecifiers)(file.to, text);
+            specifiersOf.set(file.to, specs);
+            const deps = new Set();
+            for (const spec of specs) {
+                const resolved = (0, analysis_1.resolveImportSpecifier)(file.to, spec, changedPaths);
+                if (resolved && resolved !== file.to)
+                    deps.add(resolved);
+            }
+            importsOf.set(file.to, deps);
+        }
+        const repoTree = yield getRepoTree(prDetails.owner, prDetails.repo, prDetails.headSha);
+        const fetchCache = new Map();
+        for (const batch of (0, analysis_1.buildReviewGroups)(reviewable, importsOf, batchTokenBudget())) {
+            try {
+                comments.push(...(yield reviewBatch(batch, parsedDiff, contents, specifiersOf, repoTree, changedPaths, prDetails, fetchCache)));
+            }
+            catch (e) {
+                console.warn(`Batch review failed for [${batch
+                    .map((f) => f.to)
+                    .join(", ")}], skipping:`, e instanceof Error ? e.message : e);
+            }
         }
         return comments;
     });
 }
-function getNewFileLineNumber(change) {
-    switch (change.type) {
-        case "add":
-            return change.ln;
-        case "normal":
-            return change.ln2;
-        case "del":
-            return null; // deleted lines don't exist in the new file
-    }
+// Discover unchanged repo files related to the batch: callers (files whose
+// imports resolve into the batch — they surface breaking changes like "the
+// signature changed but this usage was not updated") and forward dependencies
+// (modules the batch calls, kept for contract checking). All failures degrade
+// to "no references".
+function findReferenceFiles(batch, specifiersOf, changedPaths, repoTree, prDetails, tokenBudget, fetchCache) {
+    var _a;
+    return __awaiter(this, void 0, void 0, function* () {
+        const batchPaths = new Set(batch.map((f) => f.to));
+        const repoPathSet = new Set(repoTree);
+        const fetchLines = (path) => __awaiter(this, void 0, void 0, function* () {
+            if (!fetchCache.has(path)) {
+                fetchCache.set(path, yield getFileContent(prDetails.owner, prDetails.repo, path, prDetails.headSha));
+            }
+            return fetchCache.get(path);
+        });
+        // Insertion-ordered path → role; callers are discovered first so they win the cap
+        const found = new Map();
+        for (const candidate of (0, analysis_1.selectCallerCandidates)([...batchPaths], repoTree, changedPaths)) {
+            if (found.size >= analysis_1.MAX_REFERENCES_PER_BATCH)
+                break;
+            const lines = yield fetchLines(candidate);
+            if (!lines)
+                continue;
+            const importsBatch = (0, analysis_1.extractImportSpecifiers)(candidate, lines.join("\n")).some((spec) => (0, analysis_1.resolveImportSpecifier)(candidate, spec, batchPaths) != null);
+            if (importsBatch)
+                found.set(candidate, "caller");
+        }
+        if (found.size < analysis_1.MAX_REFERENCES_PER_BATCH) {
+            for (const file of batch) {
+                for (const spec of (_a = specifiersOf.get(file.to)) !== null && _a !== void 0 ? _a : []) {
+                    if (found.size >= analysis_1.MAX_REFERENCES_PER_BATCH)
+                        break;
+                    const resolved = (0, analysis_1.resolveImportSpecifier)(file.to, spec, repoPathSet);
+                    if (!resolved || changedPaths.has(resolved) || found.has(resolved)) {
+                        continue;
+                    }
+                    const lines = yield fetchLines(resolved);
+                    if (lines)
+                        found.set(resolved, "dependency");
+                }
+            }
+        }
+        // Fill contents within the reference budget; callers take precedence over
+        // dependencies when the budget runs out
+        const ordered = [...found.entries()].sort((a, b) => (a[1] === "caller" ? 0 : 1) - (b[1] === "caller" ? 0 : 1));
+        const refs = [];
+        let usedTokens = 0;
+        for (const [path, role] of ordered) {
+            const lines = yield fetchLines(path);
+            if (!lines)
+                continue;
+            const remainingTokens = tokenBudget - usedTokens;
+            if (remainingTokens < 512)
+                break;
+            const maxChars = remainingTokens * 4;
+            let content = lines.join("\n");
+            if (content.length > maxChars) {
+                content =
+                    content.slice(0, maxChars) + "\n... (truncated to fit reference budget)";
+            }
+            usedTokens += (0, analysis_1.estimateTokens)(content);
+            refs.push({ path, content, role });
+        }
+        return refs;
+    });
 }
-function formatChange(change) {
-    const newLine = getNewFileLineNumber(change);
-    const lineLabel = newLine != null ? String(newLine) : "-";
-    const prefix = change.type === "add" ? "+" : change.type === "del" ? "-" : " ";
-    // change.content already has +/- prefix from parse-diff, strip it for clean formatting
-    const content = change.content.startsWith("+") || change.content.startsWith("-")
-        ? change.content.slice(1)
-        : change.content;
-    return `${lineLabel} ${prefix} ${content}`;
+// Review one batch of related files in a single AI call and map the findings
+// back onto individual files.
+function reviewBatch(batch, allFiles, contents, specifiersOf, repoTree, changedPaths, prDetails, fetchCache) {
+    var _a, _b, _c, _d;
+    return __awaiter(this, void 0, void 0, function* () {
+        const diffTexts = new Map();
+        let diffTokens = 0;
+        for (const file of batch) {
+            const text = (0, analysis_1.formatFileDiff)(file);
+            diffTexts.set(file.to, text);
+            diffTokens += (0, analysis_1.estimateTokens)(text);
+        }
+        const totalBudget = batchTokenBudget();
+        // Reference files get at most their budget share, and only if the diffs
+        // leave meaningful room
+        const references = [];
+        if (repoTree && totalBudget - diffTokens > 512) {
+            try {
+                references.push(...(yield findReferenceFiles(batch, specifiersOf, changedPaths, repoTree, prDetails, Math.min(Math.floor(totalBudget * REFERENCE_BUDGET_RATIO), totalBudget - diffTokens - 512), fetchCache)));
+            }
+            catch (e) {
+                console.warn("Reference discovery failed, continuing without references:", e instanceof Error ? e.message : e);
+            }
+        }
+        const referenceTokens = references.reduce((s, r) => s + (0, analysis_1.estimateTokens)(r.content), 0);
+        // Per-file same-file context from whatever budget is left after diffs and
+        // references; skipped entirely when there is no meaningful room
+        const contexts = new Map();
+        const contextBudget = totalBudget - diffTokens - referenceTokens;
+        const perFileBudget = Math.floor(contextBudget / batch.length);
+        for (const file of batch) {
+            const lines = perFileBudget > 512 ? (_a = contents.get(file.to)) !== null && _a !== void 0 ? _a : null : null;
+            contexts.set(file.to, lines ? extractContextWindow(lines, file.chunks, perFileBudget) : null);
+        }
+        const prompt = createBatchPrompt(batch, prDetails, contexts, diffTexts, references, (0, analysis_1.summarizeChangedFiles)(allFiles));
+        const aiResponse = yield getAIResponse(prompt);
+        if (!aiResponse || aiResponse.length === 0)
+            return [];
+        // Map findings back to batch files: exact path → path suffix → unique
+        // basename → drop (guards against the model inventing file paths)
+        const byFile = new Map();
+        for (const finding of aiResponse) {
+            const claimed = typeof finding.file === "string" ? finding.file.trim() : "";
+            let target;
+            if (claimed) {
+                target =
+                    (_b = batch.find((f) => f.to === claimed)) !== null && _b !== void 0 ? _b : batch.find((f) => f.to.endsWith("/" + claimed));
+                if (!target) {
+                    const base = claimed.split("/").pop();
+                    const matches = batch.filter((f) => f.to.split("/").pop() === base);
+                    if (matches.length === 1)
+                        target = matches[0];
+                }
+            }
+            else if (batch.length === 1) {
+                // Single-file batches may legitimately omit the file field
+                target = batch[0];
+            }
+            if (!target) {
+                console.warn(`Dropping review finding for unrecognized file "${finding.file}"`);
+                continue;
+            }
+            const arr = (_c = byFile.get(target.to)) !== null && _c !== void 0 ? _c : [];
+            arr.push(finding);
+            byFile.set(target.to, arr);
+        }
+        const comments = [];
+        for (const file of batch) {
+            comments.push(...createFileComment(file, (_d = byFile.get(file.to)) !== null && _d !== void 0 ? _d : []));
+        }
+        return comments;
+    });
 }
-function formatFileDiff(file) {
-    return file.chunks
-        .map((chunk) => {
-        const header = chunk.content;
-        const lines = chunk.changes.map(formatChange).join("\n");
-        return `${header}\n${lines}`;
+function createBatchPrompt(files, prDetails, contexts, diffTexts, references, changedFileOverview) {
+    const fileList = files.map((f) => `- ${f.to}`).join("\n");
+    const fileSections = files
+        .map((file) => {
+        var _a;
+        const context = contexts.get(file.to);
+        const contextBlock = context
+            ? `\n该文件上下文（供参考，无需对此部分发表意见）：\n\n\`\`\`\n${context}\n\`\`\`\n`
+            : "";
+        return `### 文件：${file.to}\n${contextBlock}\n待审查的 Git Diff：\n\n\`\`\`diff\n${(_a = diffTexts.get(file.to)) !== null && _a !== void 0 ? _a : ""}\n\`\`\`\n`;
     })
-        .join("\n\n");
-}
-function createFilePrompt(file, prDetails, fileContext, diffText) {
-    const contextSection = fileContext
-        ? `\n文件上下文（供参考，无需对此部分发表意见）：\n\n\`\`\`\n${fileContext}\n\`\`\`\n`
+        .join("\n");
+    const referencesSection = references.length > 0
+        ? `\n关联参考文件（本次 PR 未修改，仅供理解模块间的调用关系，绝对不要对这些文件的内容发表意见）：\n\n${references
+            .map((r) => `#### 参考文件：${r.path}（${r.role === "caller"
+            ? "调用了本次变更文件的使用方"
+            : "被本次变更文件调用的依赖"}）\n\`\`\`\n${r.content}\n\`\`\``)
+            .join("\n\n")}\n`
         : "";
-    return `你的任务是审查 Pull Request。指令如下：
+    return `你的任务是审查 Pull Request 中的多个相互关联的文件。指令如下：
 - 只输出 JSON，不要输出任何自然语言描述、前言或解释。
-- 以如下 JSON 格式返回结果：{"reviews": [{"lineNumber": <行号>, "severity": "<critical|high|medium>", "reviewComment": "<审查意见>"}]}
+- 以如下 JSON 格式返回结果：{"reviews": [{"file": "<文件路径>", "lineNumber": <行号>, "severity": "<critical|high|medium>", "reviewComment": "<审查意见>"}]}
   - critical：必然触发的问题——代码逻辑本身就是错的，只要执行到此处就会崩溃或产生错误结果（空指针解引用、数组越界、整数截断导致计算错误、逻辑判断反向等）
   - high：条件触发的严重问题——需要特定场景才暴露，但一旦触发影响严重（并发访问导致的竞态或数据损坏、资源泄漏积累导致耗尽、内部可变状态被外部修改导致不一致等）
   - medium：不触发失败但增加风险的问题——当前不会出错，但让代码更脆弱或难以维护（封装不当、命名歧义、职责过重等）
-- lineNumber 必须是新文件中的行号（标有"+"或空格的行），不能是被删除的行（标有"-"的行）。
-- 只对新增（"+"）或上下文（" "）行进行评论，不对删除（"-"）行进行评论。
+- file 字段必须原样复制下方"待审查文件列表"中列出的某个路径，绝对不要编造列表之外的文件。
+- lineNumber 必须是 file 字段所指文件的新文件行号（标有"+"或空格的行），不能是被删除的行（标有"-"的行）。
+- 只对新增（"+"）或上下文（" "）行进行评论，不对删除（"-"）行发表评论，也不对参考文件发表评论。
 - 不要给出正面评价或赞美。
-- 如果整个文件没有值得提出的问题，"reviews" 直接返回空数组，不要为了评论而勉强找问题。
+- 如果所有文件都没有值得提出的问题，"reviews" 直接返回空数组，不要为了评论而勉强找问题。
 - 忽略纯代码风格、格式化或命名偏好类的琐碎问题，除非它们会带来实际风险。
 - 以 GitHub Markdown 格式书写评论。
 - 仅将给定的描述用于整体背景理解，只对代码本身进行评论。
 - 重要：绝对不要建议在代码中添加注释。
 - 每条意见必须说明该问题会导致什么后果，而不只是描述问题本身。
 - 如果相邻行有多个问题，请合并为一条审查意见，放在最相关的行上。
+- 跨文件一致性是本次审查的重点：多个文件的修改通常是同一个功能的联动变更，请重点检查它们之间是否协调一致：
+  - 函数/接口/方法的签名、参数、返回值在一处变更后，所有文件（含参考文件）中的调用方是否同步适配
+  - 类型、常量、枚举、配置键的重命名或删除是否在所有使用处同步更新
+  - 模块间契约（错误码、事件名、序列化结构、API 路径与参数）是否相互匹配
+  - 联动修改是否完整，是否存在"改了一处、漏了另一处"的情况
+  - 本次变更是否会破坏参考文件（未修改的使用方）中的现有调用
 - 请重点审查以下维度：
   - 安全性：未校验的输入、注入风险、敏感信息泄露、权限控制缺失
   - 正确性：空值/null 未处理、边界条件、异常未捕获、逻辑错误、数值运算错误（浮点精度丢失、整数截断、单位混用、溢出）
@@ -250,7 +786,7 @@ function createFilePrompt(file, prDetails, fileContext, diffText) {
   - 性能：不必要的重复计算、循环中的昂贵操作
   - 可维护性：重复逻辑、函数职责过重、命名歧义、对外暴露内部可变状态
 
-请审查文件"${file.to}"中的以下代码差异，并在撰写回复时将 Pull Request 标题和描述纳入考量。
+请审查下列文件中的代码差异，并在撰写回复时将 Pull Request 标题和描述纳入考量。
 
 Diff 格式说明：每行以新文件行号（或被删除行用"-"表示）开头，随后是变更类型标识（"+"表示新增，"-"表示删除，" "表示上下文/未变更），然后是代码内容。
 
@@ -260,16 +796,22 @@ Pull Request 描述：
 ---
 ${prDetails.description}
 ---
-${contextSection}
-待审查的 Git Diff：
+本 PR 全部变更文件（仅供了解整体改动范围，其中部分文件可能不在本次审查列表中）：
+${changedFileOverview}
 
-\`\`\`diff
-${diffText}
-\`\`\`
-`;
+待审查文件列表（file 字段只能从中选择）：
+${fileList}
+${referencesSection}
+${fileSections}`;
 }
 function getAIResponse(prompt) {
     return __awaiter(this, void 0, void 0, function* () {
+        // Providers surface transient API/parse failures as null; retry once before
+        // giving up, since a failed batch now loses several files at once
+        const first = yield provider.getReview(prompt);
+        if (first)
+            return first;
+        console.warn("AI review call returned no result, retrying once...");
         return provider.getReview(prompt);
     });
 }
@@ -290,7 +832,7 @@ function createFileComment(file, aiResponses) {
     const validLines = new Set();
     for (const chunk of file.chunks) {
         for (const change of chunk.changes) {
-            const ln = getNewFileLineNumber(change);
+            const ln = (0, analysis_1.getNewFileLineNumber)(change);
             if (ln != null) {
                 validLines.add(ln);
             }
