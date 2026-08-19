@@ -13,6 +13,11 @@ const API_MODEL: string =
 const API_PROVIDER: string = core.getInput("API_PROVIDER") || "openai";
 const API_BASE_URL: string = core.getInput("API_BASE_URL") || "";
 const MAX_TOKENS: number = parseInt(core.getInput("MAX_TOKENS") || "16384", 10);
+// Approximate token budget (prompt instructions + diff + file context) per reviewed file
+const CONTEXT_WINDOW_TOKENS: number = parseInt(
+  core.getInput("CONTEXT_WINDOW_TOKENS") || "20480",
+  10
+);
 
 if (!API_KEY) {
   core.setFailed("API_KEY (or OPENAI_API_KEY) is required.");
@@ -35,6 +40,14 @@ interface PRDetails {
   title: string;
   description: string;
   headSha: string;
+}
+
+// A single review comment targeting a whole file. `line` is only kept as a
+// fallback anchor in case the API rejects file-level comments.
+interface FileReviewComment {
+  body: string;
+  path: string;
+  line?: number;
 }
 
 async function getPRDetails(): Promise<PRDetails> {
@@ -73,16 +86,27 @@ async function getFileContent(
   }
 }
 
+// Rough heuristic for code/diff content: ~4 characters per token
+function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
+const PROMPT_OVERHEAD_TOKENS = 2000; // prompt instructions + PR title/description
+const CONTEXT_LINES = 20; // unchanged lines of surrounding code kept around each hunk
+
 function extractContextWindow(
   fileLines: string[],
   chunks: import("parse-diff").Chunk[],
-  windowSize = 20
+  tokenBudget: number
 ): string {
-  const MAX_LINES = 150;
+  const maxChars = tokenBudget * 4;
   // 收集每个 chunk 变更区域的行范围（1-based）
   const ranges: Array<[number, number]> = chunks.map((chunk) => {
-    const start = Math.max(1, chunk.newStart - windowSize);
-    const end = Math.min(fileLines.length, chunk.newStart + chunk.newLines + windowSize - 1);
+    const start = Math.max(1, chunk.newStart - CONTEXT_LINES);
+    const end = Math.min(
+      fileLines.length,
+      chunk.newStart + chunk.newLines + CONTEXT_LINES - 1
+    );
     return [start, end];
   });
 
@@ -97,17 +121,18 @@ function extractContextWindow(
     }
   }
 
-  // 收集行，超过 MAX_LINES 截断
+  // 收集行，超出 token 预算即截断
   const resultLines: string[] = [];
+  let usedChars = 0;
   for (const [s, e] of merged) {
     for (let i = s; i <= e; i++) {
-      if (resultLines.length >= MAX_LINES) break;
-      const lineNum = String(i).padStart(4, " ");
-      resultLines.push(`${lineNum} | ${fileLines[i - 1]}`);
-    }
-    if (resultLines.length >= MAX_LINES) {
-      resultLines.push("     | ... (truncated)");
-      break;
+      const line = `${String(i).padStart(4, " ")} | ${fileLines[i - 1]}`;
+      if (usedChars + line.length + 1 > maxChars) {
+        resultLines.push("     | ... (truncated to fit context window)");
+        return resultLines.join("\n");
+      }
+      resultLines.push(line);
+      usedChars += line.length + 1;
     }
   }
   return resultLines.join("\n");
@@ -147,24 +172,34 @@ async function getChangedFilesBetweenCommits(
 async function analyzeCode(
   parsedDiff: File[],
   prDetails: PRDetails
-): Promise<Array<{ body: string; path: string; line: number }>> {
-  const comments: Array<{ body: string; path: string; line: number }> = [];
+): Promise<FileReviewComment[]> {
+  const comments: FileReviewComment[] = [];
 
   for (const file of parsedDiff) {
     if (file.to === "/dev/null") continue; // Ignore deleted files
     if (file.chunks.length === 0) continue;
 
-    // Send all chunks of a file in one prompt, with optional full-file context
-    const fileLines = await getFileContent(prDetails.owner, prDetails.repo, file.to!, prDetails.headSha);
-    const fileContext = fileLines ? extractContextWindow(fileLines, file.chunks) : null;
-    const prompt = createFilePrompt(file, prDetails, fileContext);
+    // Fit diff + surrounding file context into the context-window token budget
+    const diffText = formatFileDiff(file);
+    const contextBudget =
+      CONTEXT_WINDOW_TOKENS - PROMPT_OVERHEAD_TOKENS - estimateTokens(diffText);
+    // Skip fetching the file when there is no meaningful room left for context
+    const fileLines =
+      contextBudget > 512
+        ? await getFileContent(
+            prDetails.owner,
+            prDetails.repo,
+            file.to!,
+            prDetails.headSha
+          )
+        : null;
+    const fileContext = fileLines
+      ? extractContextWindow(fileLines, file.chunks, contextBudget)
+      : null;
+    const prompt = createFilePrompt(file, prDetails, fileContext, diffText);
     const aiResponse = await getAIResponse(prompt);
-    if (aiResponse) {
-      const newComments = createFileComment(file, aiResponse);
-      if (newComments.length > 0) {
-        comments.push(...newComments);
-      }
-    }
+    // Files without findings simply produce no comment
+    comments.push(...createFileComment(file, aiResponse ?? []));
   }
   return comments;
 }
@@ -186,21 +221,29 @@ function formatChange(change: Change): string {
   const prefix =
     change.type === "add" ? "+" : change.type === "del" ? "-" : " ";
   // change.content already has +/- prefix from parse-diff, strip it for clean formatting
-  const content = change.content.startsWith("+") || change.content.startsWith("-")
-    ? change.content.slice(1)
-    : change.content;
+  const content =
+    change.content.startsWith("+") || change.content.startsWith("-")
+      ? change.content.slice(1)
+      : change.content;
   return `${lineLabel} ${prefix} ${content}`;
 }
 
-function createFilePrompt(file: File, prDetails: PRDetails, fileContext: string | null): string {
-  const allChunksFormatted = file.chunks
+function formatFileDiff(file: File): string {
+  return file.chunks
     .map((chunk) => {
       const header = chunk.content;
       const lines = chunk.changes.map(formatChange).join("\n");
       return `${header}\n${lines}`;
     })
     .join("\n\n");
+}
 
+function createFilePrompt(
+  file: File,
+  prDetails: PRDetails,
+  fileContext: string | null,
+  diffText: string
+): string {
   const contextSection = fileContext
     ? `\n文件上下文（供参考，无需对此部分发表意见）：\n\n\`\`\`\n${fileContext}\n\`\`\`\n`
     : "";
@@ -214,7 +257,8 @@ function createFilePrompt(file: File, prDetails: PRDetails, fileContext: string 
 - lineNumber 必须是新文件中的行号（标有"+"或空格的行），不能是被删除的行（标有"-"的行）。
 - 只对新增（"+"）或上下文（" "）行进行评论，不对删除（"-"）行进行评论。
 - 不要给出正面评价或赞美。
-- 只有在发现需要改进的地方时才提供意见，否则"reviews"应为空数组。
+- 如果整个文件没有值得提出的问题，"reviews" 直接返回空数组，不要为了评论而勉强找问题。
+- 忽略纯代码风格、格式化或命名偏好类的琐碎问题，除非它们会带来实际风险。
 - 以 GitHub Markdown 格式书写评论。
 - 仅将给定的描述用于整体背景理解，只对代码本身进行评论。
 - 重要：绝对不要建议在代码中添加注释。
@@ -242,7 +286,7 @@ ${contextSection}
 待审查的 Git Diff：
 
 \`\`\`diff
-${allChunksFormatted}
+${diffText}
 \`\`\`
 `;
 }
@@ -255,7 +299,11 @@ async function getAIResponse(prompt: string): Promise<Array<{
   return provider.getReview(prompt);
 }
 
-const SEVERITY_ORDER: Record<string, number> = { critical: 0, high: 1, medium: 2 };
+const SEVERITY_ORDER: Record<string, number> = {
+  critical: 0,
+  high: 1,
+  medium: 2,
+};
 const SEVERITY_BADGE: Record<string, string> = {
   critical: "🔴 **Critical**",
   high: "🟠 **High**",
@@ -269,10 +317,10 @@ function createFileComment(
     reviewComment: string;
     severity: "critical" | "high" | "medium";
   }>
-): Array<{ body: string; path: string; line: number }> {
-  if (!file.to) return [];
+): FileReviewComment[] {
+  if (!file.to || aiResponses.length === 0) return [];
 
-  // Collect all valid new-file line numbers across all chunks
+  // Valid new-file line numbers across all chunks, used for "Line N" references
   const validLines = new Set<number>();
   for (const chunk of file.chunks) {
     for (const change of chunk.changes) {
@@ -283,44 +331,33 @@ function createFileComment(
     }
   }
 
-  // Filter to valid responses only
-  const validResponses = aiResponses.filter((r) => {
-    const line = Number(r.lineNumber);
-    if (!validLines.has(line)) {
-      console.warn(
-        `Skipping comment: line ${line} is not a valid new-file line for ${file.to}`
-      );
-      return false;
-    }
-    return true;
-  });
-
-  if (validResponses.length === 0) return [];
-
   // Sort by severity before rendering
-  const sorted = [...validResponses].sort(
-    (a, b) => (SEVERITY_ORDER[a.severity] ?? 2) - (SEVERITY_ORDER[b.severity] ?? 2)
+  const sorted = [...aiResponses].sort(
+    (a, b) =>
+      (SEVERITY_ORDER[a.severity] ?? 2) - (SEVERITY_ORDER[b.severity] ?? 2)
   );
 
-  // Merge all comments into one, posted on the first mentioned line
-  const firstLine = Number(sorted[0].lineNumber);
+  // Merge everything into a single file-level comment; keep line references
+  // only where they point at an actual new-file line
   const mergedBody = sorted
-    .map((r) => `${SEVERITY_BADGE[r.severity] ?? SEVERITY_BADGE.medium} **Line ${r.lineNumber}:** ${r.reviewComment}`)
+    .map((r) => {
+      const badge = SEVERITY_BADGE[r.severity] ?? SEVERITY_BADGE.medium;
+      const line = Number(r.lineNumber);
+      const lineRef = validLines.has(line) ? ` **Line ${line}:**` : "";
+      return `${badge}${lineRef} ${r.reviewComment}`;
+    })
     .join("\n\n");
 
-  return [
-    {
-      body: mergedBody,
-      path: file.to,
-      line: firstLine,
-    },
-  ];
+  // First changed line, kept only as a fallback anchor for line-anchored comments
+  const anchorLine = validLines.size ? Math.min(...validLines) : undefined;
+
+  return [{ body: mergedBody, path: file.to, line: anchorLine }];
 }
 
 async function getMergeSuggestion(
   prDetails: PRDetails,
   files: File[],
-  comments: Array<{ body: string; path: string; line: number }>
+  comments: FileReviewComment[]
 ): Promise<string | null> {
   const changedFiles = files
     .filter((f) => f.to && f.to !== "/dev/null")
@@ -365,15 +402,42 @@ async function createReviewComment(
   owner: string,
   repo: string,
   pull_number: number,
-  comments: Array<{ body: string; path: string; line: number }>
+  comments: FileReviewComment[]
 ): Promise<void> {
-  await octokit.pulls.createReview({
-    owner,
-    repo,
-    pull_number,
-    comments,
-    event: "COMMENT",
-  });
+  try {
+    await octokit.pulls.createReview({
+      owner,
+      repo,
+      pull_number,
+      // One file-level comment per file instead of inline comments on diff lines.
+      // subject_type is supported by the REST API but missing from octokit 19 typings.
+      comments: comments.map((c) => ({
+        body: c.body,
+        path: c.path,
+        subject_type: "file",
+      })) as unknown as { body: string; path: string; line: number }[],
+      event: "COMMENT",
+    });
+  } catch (error) {
+    // Older API versions reject file-level comments; retry anchored to a line
+    console.warn(
+      "File-level review comments rejected, falling back to line-anchored comments:",
+      error instanceof Error ? error.message : error
+    );
+    const lineComments = comments.filter((c) => c.line != null);
+    if (lineComments.length === 0) throw error;
+    await octokit.pulls.createReview({
+      owner,
+      repo,
+      pull_number,
+      comments: lineComments.map((c) => ({
+        body: c.body,
+        path: c.path,
+        line: c.line!,
+      })),
+      event: "COMMENT",
+    });
+  }
 }
 
 async function main() {

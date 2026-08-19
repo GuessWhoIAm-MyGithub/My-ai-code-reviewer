@@ -14,6 +14,7 @@ AI Code Reviewer is a GitHub Action that leverages AI to provide intelligent fee
 ## Setup
 
 1. Get an API key from your preferred provider:
+
    - [OpenAI](https://platform.openai.com/signup)
    - [Anthropic](https://console.anthropic.com/)
    - [Google AI Studio](https://aistudio.google.com/apikey)
@@ -102,30 +103,32 @@ jobs:
 You can point OpenAI or Anthropic to a custom endpoint (e.g., Azure OpenAI, local proxy):
 
 ```yaml
-      - name: AI Code Reviewer
-        uses: GuessWhoIAm-MyGithub/My-ai-code-reviewer@main
-        with:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          API_KEY: ${{ secrets.API_KEY }}
-          API_PROVIDER: "openai"
-          API_MODEL: "gpt-4"
-          API_BASE_URL: "https://your-custom-endpoint.com/v1"
+- name: AI Code Reviewer
+  uses: GuessWhoIAm-MyGithub/My-ai-code-reviewer@main
+  with:
+    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    API_KEY: ${{ secrets.API_KEY }}
+    API_PROVIDER: "openai"
+    API_MODEL: "gpt-4"
+    API_BASE_URL: "https://your-custom-endpoint.com/v1"
 ```
 
 > **Note:** Custom base URL is supported for OpenAI and Anthropic providers. Gemini does not support custom base URLs.
 
 ## Inputs
 
-| Input | Required | Default | Description |
-|---|---|---|---|
-| `GITHUB_TOKEN` | Yes | — | GitHub token to interact with the repository |
-| `API_KEY` | Yes* | `""` | API key for the AI provider |
-| `API_PROVIDER` | No | `"openai"` | AI provider: `openai`, `anthropic`, or `gemini` |
-| `API_MODEL` | No | `"gpt-4"` | Model name (e.g., `gpt-4`, `claude-sonnet-4-20250514`, `gemini-pro`) |
-| `API_BASE_URL` | No | `""` | Custom API base URL (overrides provider default) |
-| `exclude` | No | `""` | Glob patterns to exclude files, comma-separated |
+| Input                   | Required | Default    | Description                                                                        |
+| ----------------------- | -------- | ---------- | ---------------------------------------------------------------------------------- |
+| `GITHUB_TOKEN`          | Yes      | —          | GitHub token to interact with the repository                                       |
+| `API_KEY`               | Yes\*    | `""`       | API key for the AI provider                                                        |
+| `API_PROVIDER`          | No       | `"openai"` | AI provider: `openai`, `anthropic`, or `gemini`                                    |
+| `API_MODEL`             | No       | `"gpt-4"`  | Model name (e.g., `gpt-4`, `claude-sonnet-4-20250514`, `gemini-pro`)               |
+| `API_BASE_URL`          | No       | `""`       | Custom API base URL (overrides provider default)                                   |
+| `MAX_TOKENS`            | No       | `16384`    | Maximum number of tokens for the AI model response                                 |
+| `CONTEXT_WINDOW_TOKENS` | No       | `20480`    | Approximate token budget per file (prompt + diff + file context) sent to the model |
+| `exclude`               | No       | `""`       | Glob patterns to exclude files, comma-separated                                    |
 
-*You can also use the deprecated `OPENAI_API_KEY` and `OPENAI_API_MODEL` inputs for backward compatibility.
+\*You can also use the deprecated `OPENAI_API_KEY` and `OPENAI_API_MODEL` inputs for backward compatibility.
 
 ## How It Works
 
@@ -133,10 +136,9 @@ The AI Code Reviewer GitHub Action:
 
 1. Retrieves the pull request diff when a PR is opened or updated.
 2. Filters out files matching the exclude patterns.
-3. Parses the diff into file chunks with proper line number tracking.
-4. Sends each chunk to the configured AI provider with the PR title and description as context.
-5. Validates the AI's response — only comments targeting valid new-file line numbers are posted.
-6. Posts review comments directly on the relevant lines of the pull request.
+3. Sends each file's full diff (plus surrounding file context, both fitted into the `CONTEXT_WINDOW_TOKENS` budget) to the configured AI provider in a single request.
+4. Skips files for which the AI finds nothing worth flagging.
+5. Posts one file-level review comment per file with findings (falling back to a line-anchored comment if the GitHub API rejects file-level comments), plus a top-level merge suggestion on the PR.
 
 ## Contributing
 
