@@ -148,6 +148,14 @@ Contributions are welcome! Please feel free to submit issues or pull requests to
 
 Let the maintainer generate the final package (`npm run build` & `npm run package`).
 
+## Releasing
+
+Every push to `main` automatically publishes a new version via the [Release workflow](.github/workflows/release.yml):
+
+- The version number follows [conventional commits](https://www.conventionalcommits.org/): `feat:` bumps the minor version, `fix:` (or anything else) bumps the patch version, and `BREAKING CHANGE` / `type!:` bumps the major version.
+- A release with auto-generated notes is created for each version, and a floating major tag (`v1`) always points to the latest release of that major version.
+- Consumers are encouraged to pin a major version (`uses: GuessWhoIAm-MyGithub/My-ai-code-reviewer@v1`) instead of `@main`.
+
 ## License
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for more information.

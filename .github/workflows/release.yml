@@ -1,0 +1,79 @@
+name: Release
+
+# 每次 main 更新（直接 push 或 PR 合并）自动发布新版本：
+# 版本号由 conventional commit 决定——feat → 次版本，fix/其他 → 补丁，
+# BREAKING CHANGE 或 "type!:" → 主版本；同时维护浮动主版本 tag（v1）。
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 完整历史，用于定位上一个版本 tag
+          fetch-tags: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Compile check
+        run: |
+          npm ci
+          npm run build
+
+      - name: Compute next version
+        id: version
+        run: |
+          set -euo pipefail
+          latest=$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' 2>/dev/null || echo "")
+          if [ -z "$latest" ]; then
+            tag="v1.0.0"
+          else
+            range="$latest..HEAD"
+            if git log --format='%B' "$range" | grep -qE 'BREAKING CHANGE|^[a-z]+([a-z-]*)(\([^)]*\))?!:'; then
+              bump=major
+            elif git log --format='%s' "$range" | grep -qE '^feat([a-z-]*)(\([^)]*\))?:'; then
+              bump=minor
+            else
+              bump=patch
+            fi
+            IFS='.' read -r major minor patch <<< "${latest#v}"
+            case "$bump" in
+              major) major=$((major+1)); minor=0; patch=0 ;;
+              minor) minor=$((minor+1)); patch=0 ;;
+              patch) patch=$((patch+1)) ;;
+            esac
+            tag="v${major}.${minor}.${patch}"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Next release: $tag (previous: ${latest:-none})"
+
+      - name: Create release and floating major tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.version.outputs.tag }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists, nothing to do"
+            exit 0
+          fi
+          gh release create "$tag" --target "$GITHUB_SHA" --generate-notes --title "$tag"
+          major_version="${tag#v}"
+          major_tag="v${major_version%%.*}"
+          git tag -f "$major_tag" "$GITHUB_SHA"
+          git push -f origin "$major_tag"
+          echo "Released $tag and updated $major_tag"
