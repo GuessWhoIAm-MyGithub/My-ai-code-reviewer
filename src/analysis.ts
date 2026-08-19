@@ -27,6 +27,8 @@ const PY_IMPORT_RES = [
 ];
 const JVM_IMPORT_RES = [/^\s*import\s+(?:static\s+)?([\w.]+)\s*;/gm];
 const SWIFT_IMPORT_RES = [/(?:@testable\s+)?import\s+([A-Za-z_][A-Za-z0-9_]*)/g];
+// C/C++ quoted includes only: angle brackets are system/SDK headers
+const C_INCLUDE_RES = [/#\s*include\s*"([^"]+)"/g];
 // Swift links files by symbol references, not file imports; type names
 // declared on changed lines identify what nearby files may be using
 const SWIFT_DECLARATION_RES =
@@ -34,7 +36,7 @@ const SWIFT_DECLARATION_RES =
 
 export function languageOf(
   path: string
-): "js" | "python" | "go" | "jvm" | "swift" | "unknown" {
+): "js" | "python" | "go" | "jvm" | "swift" | "c" | "unknown" {
   const ext = path.slice(path.lastIndexOf(".") + 1).toLowerCase();
   if (["ts", "tsx", "js", "jsx", "mjs", "cjs", "vue", "svelte"].includes(ext))
     return "js";
@@ -42,6 +44,7 @@ export function languageOf(
   if (ext === "go") return "go";
   if (["java", "kt", "kts"].includes(ext)) return "jvm";
   if (ext === "swift") return "swift";
+  if (["c", "h", "cpp", "hpp", "cc", "cxx"].includes(ext)) return "c";
   return "unknown";
 }
 
@@ -69,6 +72,8 @@ export function extractImportSpecifiers(
     JVM_IMPORT_RES.forEach(collect);
   } else if (lang === "swift") {
     SWIFT_IMPORT_RES.forEach(collect);
+  } else if (lang === "c") {
+    C_INCLUDE_RES.forEach(collect);
   }
   return [...new Set(specs)];
 }
@@ -131,6 +136,26 @@ export function resolveImportSpecifier(
     const joined = normalizeRepoPath(base + "/" + rest);
     for (const tail of ["", ".py", "/__init__.py"]) {
       if (candidatePaths.has(joined + tail)) return joined + tail;
+    }
+    return null;
+  }
+
+  if (lang === "c") {
+    // Quoted includes resolve against the includer's directory and the repo
+    // root; fall back to a path-suffix match (components expose their own
+    // include dirs, so "driver/gpio.h" may live anywhere in the tree)
+    const bases = [
+      fromPath.includes("/")
+        ? fromPath.slice(0, fromPath.lastIndexOf("/")) + "/"
+        : "",
+      "",
+    ];
+    for (const base of bases) {
+      const p = normalizeRepoPath(base + spec);
+      if (candidatePaths.has(p)) return p;
+    }
+    for (const p of candidatePaths) {
+      if (p === spec || p.endsWith("/" + spec)) return p;
     }
     return null;
   }
