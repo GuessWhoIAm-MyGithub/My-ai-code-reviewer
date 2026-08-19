@@ -24,7 +24,13 @@ const API_MODEL: string =
   core.getInput("API_MODEL") || core.getInput("OPENAI_API_MODEL") || "gpt-4";
 const API_PROVIDER: string = core.getInput("API_PROVIDER") || "openai";
 const API_BASE_URL: string = core.getInput("API_BASE_URL") || "";
-const MAX_TOKENS: number = parseInt(core.getInput("MAX_TOKENS") || "16384", 10);
+// Response (output) token cap. Sized generously for multi-file batch reviews
+// where a single JSON response covers every file in the batch; models with a
+// 512K context window accept up to 512K output tokens.
+const MAX_TOKENS: number = parseInt(
+  core.getInput("MAX_TOKENS") || "524288",
+  10
+);
 // Approximate token budget (prompt instructions + diffs + file context +
 // reference files) per review batch. Defaults sized for a 256K-input model so
 // a typical PR is reviewed in a single cross-file call.
@@ -56,8 +62,8 @@ interface PRDetails {
   headSha: string;
 }
 
-// A single review comment targeting a whole file. `line` is only kept as a
-// fallback anchor in case the API rejects file-level comments.
+// A single review comment rendered as one merged body per file, anchored to
+// the file's first changed line.
 interface FileReviewComment {
   body: string;
   path: string;
@@ -667,7 +673,7 @@ function createFileComment(
     })
     .join("\n\n");
 
-  // First changed line, kept only as a fallback anchor for line-anchored comments
+  // Anchor line for the review comment: the file's first changed line
   const anchorLine = validLines.size ? Math.min(...validLines) : undefined;
 
   return [{ body: mergedBody, path: file.to, line: anchorLine }];
@@ -723,40 +729,28 @@ async function createReviewComment(
   pull_number: number,
   comments: FileReviewComment[]
 ): Promise<void> {
-  try {
-    await octokit.pulls.createReview({
-      owner,
-      repo,
-      pull_number,
-      // One file-level comment per file instead of inline comments on diff lines.
-      // subject_type is supported by the REST API but missing from octokit 19 typings.
-      comments: comments.map((c) => ({
-        body: c.body,
-        path: c.path,
-        subject_type: "file",
-      })) as unknown as { body: string; path: string; line: number }[],
-      event: "COMMENT",
-    });
-  } catch (error) {
-    // Older API versions reject file-level comments; retry anchored to a line
+  // One comment per file, anchored to the file's first changed line. True
+  // file-level comments (subject_type: "file") are only supported by the
+  // single-comment endpoint, not by createReview — attempting them here was
+  // always rejected with a 422.
+  const lineComments = comments.filter((c) => c.line != null);
+  if (lineComments.length < comments.length) {
     console.warn(
-      "File-level review comments rejected, falling back to line-anchored comments:",
-      error instanceof Error ? error.message : error
+      `Skipping ${comments.length - lineComments.length} comment(s) without a valid anchor line`
     );
-    const lineComments = comments.filter((c) => c.line != null);
-    if (lineComments.length === 0) throw error;
-    await octokit.pulls.createReview({
-      owner,
-      repo,
-      pull_number,
-      comments: lineComments.map((c) => ({
-        body: c.body,
-        path: c.path,
-        line: c.line!,
-      })),
-      event: "COMMENT",
-    });
   }
+  if (lineComments.length === 0) return;
+  await octokit.pulls.createReview({
+    owner,
+    repo,
+    pull_number,
+    comments: lineComments.map((c) => ({
+      body: c.body,
+      path: c.path,
+      line: c.line!,
+    })),
+    event: "COMMENT",
+  });
 }
 
 async function main() {
