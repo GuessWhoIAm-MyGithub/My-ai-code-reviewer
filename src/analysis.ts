@@ -85,16 +85,25 @@ export function resolveImportSpecifier(
   const lang = languageOf(fromPath);
 
   if (lang === "go" || lang === "jvm") {
-    // Module-path style imports: match by path suffix (package dir for Go,
-    // dotted class path for Java/Kotlin)
-    const dotted = spec.replace(/\./g, "/").replace(/\/\*$/, "");
+    // Module-path style imports matched by path suffix, each with its own
+    // direction: Go module paths ("github.com/org/repo/pkg") contain the
+    // repo-relative package dir; JVM class imports ("a.b.C") match the file
+    // path; JVM wildcard imports ("a.b.*") name a package that the
+    // candidate's directory must end with.
+    const wildcard = /\.\*$/.test(spec);
+    const dotted = spec.replace(/\.\*$/, "").replace(/\./g, "/");
+    const dirOf = (p: string) =>
+      p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "";
     for (const p of candidatePaths) {
-      const noExt = p.replace(/\.[^.]+$/, "");
-      if (lang === "jvm") {
-        if (noExt === dotted || noExt.endsWith("/" + dotted)) return p;
-      } else {
-        const dir = p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "";
+      if (lang === "go") {
+        const dir = dirOf(p);
         if (dir && (dotted === dir || dotted.endsWith("/" + dir))) return p;
+      } else if (wildcard) {
+        const dir = dirOf(p);
+        if (dir && (dir === dotted || dir.endsWith("/" + dotted))) return p;
+      } else {
+        const noExt = p.replace(/\.[^.]+$/, "");
+        if (noExt === dotted || noExt.endsWith("/" + dotted)) return p;
       }
     }
     return null;

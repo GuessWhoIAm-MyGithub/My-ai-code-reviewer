@@ -125,7 +125,7 @@ You can point OpenAI or Anthropic to a custom endpoint (e.g., Azure OpenAI, loca
 | `API_PROVIDER`          | No       | `"openai"` | AI provider: `openai`, `anthropic`, or `gemini`                                    |
 | `API_MODEL`             | No       | `"gpt-4"`  | Model name (e.g., `gpt-4`, `claude-sonnet-4-20250514`, `gemini-pro`)               |
 | `API_BASE_URL`          | No       | `""`       | Custom API base URL (overrides provider default)                                   |
-| `MAX_TOKENS`            | No       | `131072`   | Maximum number of tokens for the AI model response                                        |
+| `MAX_TOKENS`            | No       | `20480`    | Max response tokens; raise for endpoints with larger outputs (e.g. `131072` on Anthropic-compatible endpoints) |
 | `CONTEXT_WINDOW_TOKENS` | No       | `262144`   | Approximate token budget per review batch (instructions + diffs + context + references)   |
 | `exclude`               | No       | `""`       | Glob patterns to exclude files, comma-separated                                           |
 
@@ -140,7 +140,7 @@ The AI Code Reviewer GitHub Action:
 3. Groups the changed files into review batches: files linked by import relationships (or sharing a directory) are reviewed together in a single AI request, so cross-file consistency issues (a changed function signature vs. its callers, renamed constants/types, module contracts) can be detected. With the default 256K budget a typical PR is reviewed in one single request; oversized PRs are split, evicting the least-connected files first.
 4. Additionally fetches a small number of unchanged related files (callers of the changed code and modules it depends on) and includes them as read-only reference context, which surfaces breaking changes like "the interface changed but this usage was not updated".
 5. Skips files for which the AI finds nothing worth flagging.
-6. Posts one file-level review comment per file with findings (falling back to a line-anchored comment if the GitHub API rejects file-level comments), plus a top-level merge suggestion on the PR.
+6. Posts one line-anchored review comment per finding — cross-file findings list all files they involve — plus a top-level merge suggestion on the PR.
 
 ## Contributing
 
