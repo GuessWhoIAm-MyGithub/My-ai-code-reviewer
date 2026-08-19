@@ -93,9 +93,13 @@ interface ReferenceFile {
 }
 
 async function getPRDetails(): Promise<PRDetails> {
-  const { repository, number } = JSON.parse(
+  const payload = JSON.parse(
     readFileSync(process.env.GITHUB_EVENT_PATH || "", "utf8")
   );
+  // pull_request payloads carry a top-level number; issue_comment payloads
+  // (the /review command) carry it on the issue object
+  const number = payload.number ?? payload.issue?.number;
+  const { repository } = payload;
   const prResponse = await octokit.pulls.get({
     owner: repository.owner.login,
     repo: repository.name,
@@ -795,6 +799,8 @@ async function createReviewComment(
 interface ReviewThreadInfo {
   id: string;
   path: string;
+  line: number | null;
+  snippet: string;
 }
 
 async function getOpenReviewThreads(
@@ -850,18 +856,28 @@ async function getOpenReviewThreads(
     return [];
   }
   return threads
-    .filter(
-      (t) =>
-        !t.isResolved &&
-        t.comments.nodes.some((c) => c.body?.includes(COMMENT_MARKER))
-    )
-    .map((t) => ({ id: t.id, path: t.path }));
+    .filter((t) => !t.isResolved)
+    .map((t) => {
+      const marked = t.comments.nodes.find((c) =>
+        c.body?.includes(COMMENT_MARKER)
+      );
+      if (!marked?.body) return null;
+      const lineMatch = marked.body.match(/\*\*Line (\d+):\*\*/);
+      return {
+        id: t.id,
+        path: t.path,
+        line: lineMatch ? Number(lineMatch[1]) : null,
+        snippet: marked.body.replace(COMMENT_MARKER, "").split("\n")[0].slice(0, 200),
+      };
+    })
+    .filter((t): t is ReviewThreadInfo => t !== null);
 }
 
 async function resolveReviewedThreads(
   threads: ReviewThreadInfo[],
   reviewedPaths: Set<string>
-): Promise<void> {
+): Promise<Set<string>> {
+  const resolved = new Set<string>();
   const outdated = threads.filter((t) => reviewedPaths.has(t.path));
   for (const thread of outdated) {
     try {
@@ -873,6 +889,7 @@ async function resolveReviewedThreads(
         }`,
         { threadId: thread.id }
       );
+      resolved.add(thread.id);
     } catch (e) {
       console.warn(
         `Could not resolve previous thread on ${thread.path}:`,
@@ -880,28 +897,126 @@ async function resolveReviewedThreads(
       );
     }
   }
-  if (outdated.length > 0) {
+  if (resolved.size > 0) {
     console.log(
-      `Resolved ${outdated.length} previous review thread(s) on re-reviewed files`
+      `Resolved ${resolved.size} previous review thread(s) on re-reviewed files`
     );
   }
+  return resolved;
+}
+
+// Compact follow-up summary that replaces the full merge suggestion on later
+// reviews, computed deterministically from thread resolution + fresh comments:
+// an old thread resolved and not re-flagged means fixed; resolved but
+// re-flagged means still open; threads on untouched files stay pending.
+function buildUpdateSummary(
+  previousThreads: ReviewThreadInfo[],
+  resolvedIds: Set<string>,
+  comments: FileReviewComment[],
+  reviewedPaths: Set<string>
+): string {
+  const key = (path: string, line?: number | null) => `${path}:${line ?? "-"}`;
+  const currentKeys = new Set(comments.map((c) => key(c.path, c.line)));
+  const oldKeys = new Set(previousThreads.map((t) => key(t.path, t.line)));
+
+  const fixed: ReviewThreadInfo[] = [];
+  const unfixed: ReviewThreadInfo[] = [];
+  const pending: ReviewThreadInfo[] = [];
+  for (const t of previousThreads) {
+    if (resolvedIds.has(t.id)) {
+      (currentKeys.has(key(t.path, t.line)) ? unfixed : fixed).push(t);
+    } else {
+      pending.push(t);
+    }
+  }
+  const fresh = comments.filter((c) => !oldKeys.has(key(c.path, c.line)));
+
+  const open = unfixed.length + fresh.length;
+  const conclusion =
+    open > 0
+      ? `❌ 仍有 ${open} 个未解决问题，暂不建议合并`
+      : pending.length > 0
+        ? `✅ 已重审的问题全部修复，另有 ${pending.length} 个待确认项（对应文件未改动）`
+        : "✅ 所有问题已修复，建议合并";
+
+  const sections: string[] = [];
+  const list = (lines: string[]) => lines.map((l) => `- ${l}`).join("\n");
+  if (fixed.length > 0) {
+    sections.push(
+      `### ✅ 已修复（本轮重审未再指出）\n\n${list(
+        fixed.map((t) => `\`${t.path}\` Line ${t.line ?? "?"}：${t.snippet}`)
+      )}`
+    );
+  }
+  if (unfixed.length > 0) {
+    sections.push(
+      `### ❌ 仍未修复\n\n${list(
+        unfixed.map(
+          (t) => `\`${t.path}\` Line ${t.line ?? "?"}：${t.snippet}（最新意见见上方新评论）`
+        )
+      )}`
+    );
+  }
+  if (fresh.length > 0) {
+    sections.push(
+      `### 🆕 本轮新发现\n\n${list(
+        fresh.map(
+          (c) =>
+            `\`${c.path}\` Line ${c.line ?? "?"}：${c.body
+              .replace(COMMENT_MARKER, "")
+              .split("\n")[0]
+              .slice(0, 200)}`
+        )
+      )}`
+    );
+  }
+  if (pending.length > 0) {
+    sections.push(
+      `### 📌 待确认（文件未改动，沿用上次意见）\n\n${list(
+        pending.map((t) => `\`${t.path}\` Line ${t.line ?? "?"}：${t.snippet}`)
+      )}`
+    );
+  }
+
+  return `## 🤖 AI 代码审查 - 更新摘要\n\n**结论：${conclusion}**\n\n${sections.join("\n\n")}`;
 }
 
 async function main() {
-  const prDetails = await getPRDetails();
-  let diff: string | null;
   const eventData = JSON.parse(
     readFileSync(process.env.GITHUB_EVENT_PATH ?? "", "utf8")
   );
+  const eventName = process.env.GITHUB_EVENT_NAME ?? "";
 
-  if (eventData.action === "opened" || eventData.action === "synchronize") {
+  // "/review" comment on a PR triggers a full re-scan: every file is
+  // re-reviewed with the latest context and all previous threads converge to
+  // fixed/unfixed. Any other comment is ignored.
+  if (eventName === "issue_comment") {
+    const body = (eventData.comment?.body ?? "").trim();
+    const onPullRequest = eventData.issue?.pull_request != null;
+    const author = eventData.comment?.user?.login ?? "";
+    const byBot = author === "github-actions[bot]" || author === "github-actions";
+    if (body !== "/review" || !onPullRequest || byBot) {
+      console.log(`Ignoring issue_comment event (${body.slice(0, 40) || "empty"})`);
+      return;
+    }
+  }
+  const fullRescan = eventName === "issue_comment";
+
+  const prDetails = await getPRDetails();
+  let diff: string | null;
+
+  if (
+    eventData.action === "opened" ||
+    eventData.action === "synchronize" ||
+    fullRescan
+  ) {
     diff = await getDiff(
       prDetails.owner,
       prDetails.repo,
       prDetails.pull_number
     );
   } else {
-    console.log("Unsupported event:", process.env.GITHUB_EVENT_NAME);
+    console.log("Unsupported event:", eventName);
     return;
   }
 
@@ -923,8 +1038,9 @@ async function main() {
     );
   });
 
-  // 对 synchronize 事件，只审查本次 push 中变更的文件，避免重复审查
-  if (eventData.action === "synchronize") {
+  // 对 synchronize 事件，只审查本次 push 中变更的文件，避免重复审查；
+  // /review 全量重扫不做此过滤，让所有旧线程都能收敛
+  if (!fullRescan && eventData.action === "synchronize") {
     try {
       const changedFiles = await getChangedFilesBetweenCommits(
         prDetails.owner,
@@ -968,14 +1084,17 @@ async function main() {
       .map((f) => f.to ?? "")
       .filter((p) => p && p !== "/dev/null")
   );
-  await resolveReviewedThreads(previousThreads, reviewedPaths);
-
-  // Merge suggestion: keep a single up-to-date comment instead of one per push
-  const mergeSuggestion = await getMergeSuggestion(
-    prDetails,
-    filteredDiff,
-    comments
+  const resolvedIds = await resolveReviewedThreads(
+    previousThreads,
+    reviewedPaths
   );
+
+  // First review: full AI merge suggestion. Follow-up pushes: compact
+  // deterministic fix-status summary. Both update the same single comment.
+  const mergeSuggestion =
+    previousThreads.length > 0
+      ? buildUpdateSummary(previousThreads, resolvedIds, comments, reviewedPaths)
+      : await getMergeSuggestion(prDetails, filteredDiff, comments);
   if (mergeSuggestion) {
     const body = `${mergeSuggestion}\n${COMMENT_MARKER}`;
     try {

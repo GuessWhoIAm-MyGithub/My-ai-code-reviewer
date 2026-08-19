@@ -4,6 +4,9 @@ on:
     types:
       - opened
       - synchronize
+  issue_comment:
+    types:
+      - created
 permissions: write-all
 jobs:
   code_review:

@@ -478,9 +478,13 @@ const provider = (0, providers_1.createProvider)(API_PROVIDER, {
     maxTokens: MAX_TOKENS,
 });
 function getPRDetails() {
-    var _a, _b;
+    var _a, _b, _c, _d;
     return __awaiter(this, void 0, void 0, function* () {
-        const { repository, number } = JSON.parse((0, fs_1.readFileSync)(process.env.GITHUB_EVENT_PATH || "", "utf8"));
+        const payload = JSON.parse((0, fs_1.readFileSync)(process.env.GITHUB_EVENT_PATH || "", "utf8"));
+        // pull_request payloads carry a top-level number; issue_comment payloads
+        // (the /review command) carry it on the issue object
+        const number = (_a = payload.number) !== null && _a !== void 0 ? _a : (_b = payload.issue) === null || _b === void 0 ? void 0 : _b.number;
+        const { repository } = payload;
         const prResponse = yield octokit.pulls.get({
             owner: repository.owner.login,
             repo: repository.name,
@@ -490,8 +494,8 @@ function getPRDetails() {
             owner: repository.owner.login,
             repo: repository.name,
             pull_number: number,
-            title: (_a = prResponse.data.title) !== null && _a !== void 0 ? _a : "",
-            description: (_b = prResponse.data.body) !== null && _b !== void 0 ? _b : "",
+            title: (_c = prResponse.data.title) !== null && _c !== void 0 ? _c : "",
+            description: (_d = prResponse.data.body) !== null && _d !== void 0 ? _d : "",
             headSha: prResponse.data.head.sha,
         };
     });
@@ -1030,13 +1034,25 @@ function getOpenReviewThreads(owner, repo, pull_number) {
             return [];
         }
         return threads
-            .filter((t) => !t.isResolved &&
-            t.comments.nodes.some((c) => { var _a; return (_a = c.body) === null || _a === void 0 ? void 0 : _a.includes(COMMENT_MARKER); }))
-            .map((t) => ({ id: t.id, path: t.path }));
+            .filter((t) => !t.isResolved)
+            .map((t) => {
+            const marked = t.comments.nodes.find((c) => { var _a; return (_a = c.body) === null || _a === void 0 ? void 0 : _a.includes(COMMENT_MARKER); });
+            if (!(marked === null || marked === void 0 ? void 0 : marked.body))
+                return null;
+            const lineMatch = marked.body.match(/\*\*Line (\d+):\*\*/);
+            return {
+                id: t.id,
+                path: t.path,
+                line: lineMatch ? Number(lineMatch[1]) : null,
+                snippet: marked.body.replace(COMMENT_MARKER, "").split("\n")[0].slice(0, 200),
+            };
+        })
+            .filter((t) => t !== null);
     });
 }
 function resolveReviewedThreads(threads, reviewedPaths) {
     return __awaiter(this, void 0, void 0, function* () {
+        const resolved = new Set();
         const outdated = threads.filter((t) => reviewedPaths.has(t.path));
         for (const thread of outdated) {
             try {
@@ -1045,27 +1061,94 @@ function resolveReviewedThreads(threads, reviewedPaths) {
             thread { isResolved }
           }
         }`, { threadId: thread.id });
+                resolved.add(thread.id);
             }
             catch (e) {
                 console.warn(`Could not resolve previous thread on ${thread.path}:`, e instanceof Error ? e.message : e);
             }
         }
-        if (outdated.length > 0) {
-            console.log(`Resolved ${outdated.length} previous review thread(s) on re-reviewed files`);
+        if (resolved.size > 0) {
+            console.log(`Resolved ${resolved.size} previous review thread(s) on re-reviewed files`);
         }
+        return resolved;
     });
 }
+// Compact follow-up summary that replaces the full merge suggestion on later
+// reviews, computed deterministically from thread resolution + fresh comments:
+// an old thread resolved and not re-flagged means fixed; resolved but
+// re-flagged means still open; threads on untouched files stay pending.
+function buildUpdateSummary(previousThreads, resolvedIds, comments, reviewedPaths) {
+    const key = (path, line) => `${path}:${line !== null && line !== void 0 ? line : "-"}`;
+    const currentKeys = new Set(comments.map((c) => key(c.path, c.line)));
+    const oldKeys = new Set(previousThreads.map((t) => key(t.path, t.line)));
+    const fixed = [];
+    const unfixed = [];
+    const pending = [];
+    for (const t of previousThreads) {
+        if (resolvedIds.has(t.id)) {
+            (currentKeys.has(key(t.path, t.line)) ? unfixed : fixed).push(t);
+        }
+        else {
+            pending.push(t);
+        }
+    }
+    const fresh = comments.filter((c) => !oldKeys.has(key(c.path, c.line)));
+    const open = unfixed.length + fresh.length;
+    const conclusion = open > 0
+        ? `❌ 仍有 ${open} 个未解决问题，暂不建议合并`
+        : pending.length > 0
+            ? `✅ 已重审的问题全部修复，另有 ${pending.length} 个待确认项（对应文件未改动）`
+            : "✅ 所有问题已修复，建议合并";
+    const sections = [];
+    const list = (lines) => lines.map((l) => `- ${l}`).join("\n");
+    if (fixed.length > 0) {
+        sections.push(`### ✅ 已修复（本轮重审未再指出）\n\n${list(fixed.map((t) => { var _a; return `\`${t.path}\` Line ${(_a = t.line) !== null && _a !== void 0 ? _a : "?"}：${t.snippet}`; }))}`);
+    }
+    if (unfixed.length > 0) {
+        sections.push(`### ❌ 仍未修复\n\n${list(unfixed.map((t) => { var _a; return `\`${t.path}\` Line ${(_a = t.line) !== null && _a !== void 0 ? _a : "?"}：${t.snippet}（最新意见见上方新评论）`; }))}`);
+    }
+    if (fresh.length > 0) {
+        sections.push(`### 🆕 本轮新发现\n\n${list(fresh.map((c) => {
+            var _a;
+            return `\`${c.path}\` Line ${(_a = c.line) !== null && _a !== void 0 ? _a : "?"}：${c.body
+                .replace(COMMENT_MARKER, "")
+                .split("\n")[0]
+                .slice(0, 200)}`;
+        }))}`);
+    }
+    if (pending.length > 0) {
+        sections.push(`### 📌 待确认（文件未改动，沿用上次意见）\n\n${list(pending.map((t) => { var _a; return `\`${t.path}\` Line ${(_a = t.line) !== null && _a !== void 0 ? _a : "?"}：${t.snippet}`; }))}`);
+    }
+    return `## 🤖 AI 代码审查 - 更新摘要\n\n**结论：${conclusion}**\n\n${sections.join("\n\n")}`;
+}
 function main() {
-    var _a;
+    var _a, _b, _c, _d, _e, _f, _g, _h;
     return __awaiter(this, void 0, void 0, function* () {
+        const eventData = JSON.parse((0, fs_1.readFileSync)((_a = process.env.GITHUB_EVENT_PATH) !== null && _a !== void 0 ? _a : "", "utf8"));
+        const eventName = (_b = process.env.GITHUB_EVENT_NAME) !== null && _b !== void 0 ? _b : "";
+        // "/review" comment on a PR triggers a full re-scan: every file is
+        // re-reviewed with the latest context and all previous threads converge to
+        // fixed/unfixed. Any other comment is ignored.
+        if (eventName === "issue_comment") {
+            const body = ((_d = (_c = eventData.comment) === null || _c === void 0 ? void 0 : _c.body) !== null && _d !== void 0 ? _d : "").trim();
+            const onPullRequest = ((_e = eventData.issue) === null || _e === void 0 ? void 0 : _e.pull_request) != null;
+            const author = (_h = (_g = (_f = eventData.comment) === null || _f === void 0 ? void 0 : _f.user) === null || _g === void 0 ? void 0 : _g.login) !== null && _h !== void 0 ? _h : "";
+            const byBot = author === "github-actions[bot]" || author === "github-actions";
+            if (body !== "/review" || !onPullRequest || byBot) {
+                console.log(`Ignoring issue_comment event (${body.slice(0, 40) || "empty"})`);
+                return;
+            }
+        }
+        const fullRescan = eventName === "issue_comment";
         const prDetails = yield getPRDetails();
         let diff;
-        const eventData = JSON.parse((0, fs_1.readFileSync)((_a = process.env.GITHUB_EVENT_PATH) !== null && _a !== void 0 ? _a : "", "utf8"));
-        if (eventData.action === "opened" || eventData.action === "synchronize") {
+        if (eventData.action === "opened" ||
+            eventData.action === "synchronize" ||
+            fullRescan) {
             diff = yield getDiff(prDetails.owner, prDetails.repo, prDetails.pull_number);
         }
         else {
-            console.log("Unsupported event:", process.env.GITHUB_EVENT_NAME);
+            console.log("Unsupported event:", eventName);
             return;
         }
         if (!diff) {
@@ -1080,8 +1163,9 @@ function main() {
         let filteredDiff = parsedDiff.filter((file) => {
             return !excludePatterns.some((pattern) => { var _a; return (0, minimatch_1.default)((_a = file.to) !== null && _a !== void 0 ? _a : "", pattern); });
         });
-        // 对 synchronize 事件，只审查本次 push 中变更的文件，避免重复审查
-        if (eventData.action === "synchronize") {
+        // 对 synchronize 事件，只审查本次 push 中变更的文件，避免重复审查；
+        // /review 全量重扫不做此过滤，让所有旧线程都能收敛
+        if (!fullRescan && eventData.action === "synchronize") {
             try {
                 const changedFiles = yield getChangedFilesBetweenCommits(prDetails.owner, prDetails.repo, eventData.before, eventData.after);
                 filteredDiff = filteredDiff.filter((file) => { var _a; return changedFiles.has((_a = file.to) !== null && _a !== void 0 ? _a : ""); });
@@ -1102,9 +1186,12 @@ function main() {
         const reviewedPaths = new Set(filteredDiff
             .map((f) => { var _a; return (_a = f.to) !== null && _a !== void 0 ? _a : ""; })
             .filter((p) => p && p !== "/dev/null"));
-        yield resolveReviewedThreads(previousThreads, reviewedPaths);
-        // Merge suggestion: keep a single up-to-date comment instead of one per push
-        const mergeSuggestion = yield getMergeSuggestion(prDetails, filteredDiff, comments);
+        const resolvedIds = yield resolveReviewedThreads(previousThreads, reviewedPaths);
+        // First review: full AI merge suggestion. Follow-up pushes: compact
+        // deterministic fix-status summary. Both update the same single comment.
+        const mergeSuggestion = previousThreads.length > 0
+            ? buildUpdateSummary(previousThreads, resolvedIds, comments, reviewedPaths)
+            : yield getMergeSuggestion(prDetails, filteredDiff, comments);
         if (mergeSuggestion) {
             const body = `${mergeSuggestion}\n${COMMENT_MARKER}`;
             try {
