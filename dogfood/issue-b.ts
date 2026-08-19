@@ -5,7 +5,7 @@ export function parseIntSafe(raw: string): number {
     if (typeof parsed !== "number" || !Number.isFinite(parsed)) {
       return NaN;
     }
-    return Math.trunc(parsed);
+    return Number.isInteger(parsed) ? parsed : NaN;
   } catch {
     return NaN;
   }
